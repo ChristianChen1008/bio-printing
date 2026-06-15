@@ -14,6 +14,11 @@ matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
+plt.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"
+]
+plt.rcParams["axes.unicode_minus"] = False
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 
@@ -306,6 +311,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
 
         # --- 路径预览图 ---
         self.figure, self.axes = plt.subplots(figsize=(4.5, 6))
+        self.figure.patch.set_facecolor("#ffffff")
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
@@ -337,6 +343,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
 
         # 初始化日志
         self._log("控制台已启动。请配置参数并选择轨迹类型。")
+        self._set_print_state("就绪")
 
     # ── 端口刷新 ─────────────────────────────────────
 
@@ -362,6 +369,26 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     def _log(self, msg):
         stamp = time.strftime("%H:%M:%S")
         self.text_log.append(f"[{stamp}] {msg}")
+
+    def _set_lamp(self, lamp, connected):
+        color = "#1f9d61" if connected else "#9aa5b1"
+        lamp.setStyleSheet(f"background-color:{color};border-radius:7px")
+
+    def _set_print_state(self, state):
+        palette = {
+            "就绪": ("#e7f7ef", "#147a45"),
+            "连接设备...": ("#eaf0ff", "#315fc5"),
+            "轨迹已生成": ("#eaf0ff", "#315fc5"),
+            "打印中...": ("#fff4db", "#96620d"),
+            "完成": ("#e7f7ef", "#147a45"),
+            "已中止": ("#fff0e6", "#a54e00"),
+            "出错": ("#fdeaea", "#b42323"),
+        }
+        bg, fg = palette.get(state, ("#eef2f7", "#40516a"))
+        self.label_print_state.setText(state)
+        self.label_print_state.setStyleSheet(
+            f"background:{bg};color:{fg};border-radius:17px;padding:4px 12px;"
+        )
 
     # ── 轨迹类型切换 ───────────────────────────────
 
@@ -396,7 +423,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 pass
             self.arm = None
             self.pb_arm_connect.setText("连接机械臂")
-            self.lamp_arm.setStyleSheet("background-color:gray;border-radius:7px")
+            self._set_lamp(self.lamp_arm, False)
             self.label_arm_state.setText("未连接")
             self._log("机械臂已断开")
             return
@@ -409,7 +436,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             self.arm.speed = speed
             self.arm.acceleration = accel
             self.pb_arm_connect.setText("断开")
-            self.lamp_arm.setStyleSheet("background-color:#66ff00;border-radius:7px")
+            self._set_lamp(self.lamp_arm, True)
             self.label_arm_state.setText("已连接")
             self._log(f"✓ 机械臂已连接 {ip}, 速度={speed} mm/s, 加速度={accel} mm/s²")
         except Exception as e:
@@ -441,7 +468,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 pass
             self.motor = None
             self.pb_ext_connect.setText("连接喷头")
-            self.lamp_ext.setStyleSheet("background-color:gray;border-radius:7px")
+            self._set_lamp(self.lamp_ext, False)
             self.label_ext_state.setText("未连接")
             self._log("喷头已断开")
             return
@@ -452,7 +479,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             self.motor = Motor(serial_port=port, serial_baud=baud)
             self.motor.enable()
             self.pb_ext_connect.setText("断开")
-            self.lamp_ext.setStyleSheet("background-color:#66ff00;border-radius:7px")
+            self._set_lamp(self.lamp_ext, True)
             self.label_ext_state.setText("已连接")
             self._log(f"✓ 喷头已连接 {port} @ {baud}")
         except Exception as e:
@@ -489,16 +516,28 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         try:
             self._traj, self._path_3d = self._build_trajectory()
 
+            for extra_ax in self.figure.axes[1:]:
+                extra_ax.remove()
             self.axes.clear()
             if self._path_3d is not None and len(self._path_3d) > 0:
                 pts = np.array(self._path_3d)
-                self.axes.plot(pts[:, 0], pts[:, 1], "b-", linewidth=0.5)
-                self.axes.scatter(pts[0, 0], pts[0, 1], c="green", s=40, label="起点")
+                if pts.shape[1] >= 3 and len(np.unique(pts[:, 2])) > 1:
+                    sc = self.axes.scatter(
+                        pts[:, 0], pts[:, 1], c=pts[:, 2], s=9,
+                        cmap="viridis", alpha=0.85, label="路径点")
+                    self.figure.colorbar(sc, ax=self.axes, fraction=0.035, pad=0.02, label="Z (mm)")
+                else:
+                    self.axes.plot(pts[:, 0], pts[:, 1], color="#315fc5", linewidth=1.1)
+                self.axes.scatter(pts[0, 0], pts[0, 1], c="#1f9d61", s=52, label="起点", zorder=3)
                 if len(pts) > 1:
-                    self.axes.scatter(pts[-1, 0], pts[-1, 1], c="red", s=40, label="终点")
+                    self.axes.scatter(pts[-1, 0], pts[-1, 1], c="#d93f3f", s=52, label="终点", zorder=3)
                 self.axes.set_aspect("equal")
+                self.axes.set_xlabel("X / mm")
+                self.axes.set_ylabel("Y / mm")
+                self.axes.grid(True, color="#d8e0eb", linewidth=0.6, alpha=0.85)
                 self.axes.legend(fontsize=8)
-            self.axes.set_title(f"{self._traj}", fontsize=10)
+            self.axes.set_title(f"{self._traj}", fontsize=11, color="#20324d")
+            self.figure.tight_layout(pad=1.2)
             self.canvas.draw()
 
             total_len = self._traj.get_total_length()
@@ -608,7 +647,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 pass
             self.motor = None
             self.pb_ext_connect.setText("连接喷头")
-            self.lamp_ext.setStyleSheet("background-color:gray;border-radius:7px")
+            self._set_lamp(self.lamp_ext, False)
             self.label_ext_state.setText("未连接")
             self._log("已释放主窗口喷头连接")
 
@@ -619,7 +658,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 pass
             self.arm = None
             self.pb_arm_connect.setText("连接机械臂")
-            self.lamp_arm.setStyleSheet("background-color:gray;border-radius:7px")
+            self._set_lamp(self.lamp_arm, False)
             self.label_arm_state.setText("未连接")
             self._log("已释放主窗口机械臂连接")
 
@@ -666,7 +705,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
 
         self._print_worker = PrintWorker(params)
         self._print_worker.log_signal.connect(self._log)
-        self._print_worker.state_signal.connect(self.label_print_state.setText)
+        self._print_worker.state_signal.connect(self._set_print_state)
         self._print_worker.finished_signal.connect(self._on_print_finished)
         self._print_worker.start()
 
@@ -675,13 +714,13 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             self._log("=" * 40)
         else:
             self._log("打印异常终止")
-        self.label_print_state.setText("就绪")
+        self._set_print_state("就绪")
 
     def _on_abort(self):
         if self._print_worker and self._print_worker.isRunning():
             self._print_worker._abort = True
             self._log("⚠ 紧急停止！")
-            self.label_print_state.setText("已中止")
+            self._set_print_state("已中止")
             w = self._print_worker
             # 直接停止 worker 内部连接的机械臂和电机
             if w.arm:
