@@ -75,6 +75,15 @@ def _trajectory_to_path_3d(traj, default_z):
     return np.column_stack([path_2d, np.full(len(path_2d), default_z)])
 
 
+def _map_corner_value(corner_value):
+    return {
+        "bl": "bottom_left",
+        "br": "bottom_right",
+        "tl": "top_left",
+        "tr": "top_right",
+    }.get(corner_value, corner_value)
+
+
 # ==================== 打印工作线程 ====================
 
 class PrintWorker(QThread):
@@ -89,6 +98,269 @@ class PrintWorker(QThread):
         self._abort = False
         self.arm = arm    # 暴露给主线程做紧急停止
         self.motor = motor
+        self._current_point = None
+
+    def _abort_if_requested(self, stop_motor=False):
+        if not self._abort:
+            return
+        if stop_motor and self.motor is not None:
+            try:
+                self.motor.stop(emergency=False)
+            except Exception:
+                pass
+        raise InterruptedError("打印已中止")
+
+    def _sleep_with_abort(self, seconds, stop_motor=False):
+        deadline = time.time() + max(float(seconds), 0.0)
+        while time.time() < deadline:
+            self._abort_if_requested(stop_motor=stop_motor)
+            time.sleep(min(0.05, max(deadline - time.time(), 0.0)))
+
+    def _move_to_point(self, point_xyz, *, log_message=None):
+        point = np.array(point_xyz, dtype=float)[:3]
+        if log_message:
+            self.log_signal.emit(log_message)
+        self._run_arm_motion(self.arm.move_to_point, point)
+        self._current_point = point
+        self._abort_if_requested()
+
+    def _move_path(self, path_points, *, blend_radius, log_message=None, stop_motor_on_abort=False):
+        path_3d = np.array(path_points, dtype=float)
+        if len(path_3d) == 0:
+            return
+        if log_message:
+            self.log_signal.emit(log_message)
+        self._run_arm_motion(self.arm.move_path, path_3d, blend_radius=blend_radius)
+        self._current_point = np.array(path_3d[-1], dtype=float)[:3]
+        self._abort_if_requested(stop_motor=stop_motor_on_abort)
+
+    def _build_single_trajectory(self):
+        p = self.params
+        traj_type = p["path_type"]
+        cx, cy = p["center_x"], p["center_y"]
+        is_3d = p["is_3d"]
+        layers = p["layers"] if is_3d else 1
+        corner = _map_corner_value(p.get("corner", "bottom_left"))
+
+        if traj_type == "矩形填充":
+            return TrajectoryFactory.rectangle(
+                center=[cx, cy, p["work_z"]],
+                width=p["width"],
+                height=p["height"],
+                line_width=p["line_width"],
+                start_corner=corner,
+                name="矩形",
+                is_3d=is_3d,
+                layers=layers,
+                layer_height=p["layer_height"],
+            )
+        if traj_type == "矩形轮廓":
+            return TrajectoryFactory.rectangle_outline(
+                center=[cx, cy, p["work_z"]],
+                length_x=p["width"],
+                width_y=p["height"],
+                step_mm=1.0,
+                name="矩形轮廓",
+                is_3d=is_3d,
+                layers=layers,
+                layer_height=p["layer_height"],
+            )
+        if traj_type == "圆形":
+            return TrajectoryFactory.circle(
+                center=[cx, cy],
+                radius=p["radius"],
+                name="圆形",
+                is_3d=is_3d,
+                layers=layers,
+            )
+        if traj_type == "弦图":
+            return TrajectoryFactory.chord_diagram(
+                center=[cx, cy],
+                radius=p["radius"],
+                num_chords=p["num_chords"],
+                name="弦图",
+                is_3d=is_3d,
+                layers=layers,
+            )
+        if traj_type == "直线":
+            return TrajectoryFactory.line(
+                start=[p["line_x1"], p["line_y1"]],
+                end=[p["line_x2"], p["line_y2"]],
+                step_mm=p["line_step"],
+                name="直线",
+            )
+        raise ValueError(f"未知轨迹类型: {traj_type}")
+
+    def _trajectory_to_execution_path(self, traj, default_z=None):
+        return _trajectory_to_path_3d(traj, self.params["work_z"] if default_z is None else default_z)
+
+    def _resolve_program_step_z(self, step):
+        if "work_z" in step.params:
+            return float(step.params["work_z"])
+
+        traj = step.params.get("trajectory")
+        traj_z = getattr(traj, "z_height", None)
+        if traj_z is not None:
+            return float(traj_z)
+
+        return float(self.params["work_z"])
+
+    def _prime_and_start_extrusion(self):
+        p = self.params
+        motor = self.motor
+
+        prime_pulses = p["prime"]
+        if prime_pulses > 0:
+            self.log_signal.emit(f"预挤出 {prime_pulses} 脉冲...")
+            motor.set_speed(p["ext_rpm"])
+            motor.forward(prime_pulses)
+            self._abort_if_requested(stop_motor=True)
+
+        ext_rpm = p["ext_rpm"]
+        delay = p["ext_delay"]
+        if ext_rpm > 0 or delay > 0:
+            self.log_signal.emit(f"持续挤出 {ext_rpm} r/min, 等待 {delay} 秒")
+            motor.set_speed(ext_rpm)
+            motor.move(CW=False)
+            if delay > 0:
+                self._sleep_with_abort(delay, stop_motor=True)
+        else:
+            self.log_signal.emit("跳过持续挤出（速度=0 且 延迟=0）")
+        self._abort_if_requested(stop_motor=True)
+
+    def _stop_and_retract(self, pulses=None, speed=50, *, pause_seconds=0.3):
+        retract_pulses = self.params["retract"] if pulses is None else int(pulses)
+        self.log_signal.emit("停止喷头...")
+        self.motor.stop(emergency=False)
+        self.log_signal.emit(f"回抽 {retract_pulses} 脉冲")
+        self.motor.backward(retract_pulses, speed=speed)
+        if pause_seconds > 0:
+            self._sleep_with_abort(pause_seconds)
+
+    def _execute_print_path(self, path_3d, *, retract_after):
+        p = self.params
+        path_3d = np.array(path_3d, dtype=float)
+        if len(path_3d) < 2:
+            raise RuntimeError("路径点不足，无法执行")
+
+        self._move_to_point(path_3d[0], log_message=f"移动到起点: {path_3d[0]}")
+        self._sleep_with_abort(0.5)
+        self._prime_and_start_extrusion()
+
+        self.log_signal.emit("执行打印轨迹...")
+        self.state_signal.emit("打印中...")
+        blend = p["blend"]
+        pre_stop_mm = p.get("pre_stop", 0)
+
+        if pre_stop_mm > 0 and len(path_3d) > 3:
+            cumsum = 0.0
+            split_idx = len(path_3d) - 1
+            for i in range(len(path_3d) - 1, 0, -1):
+                cumsum += float(np.linalg.norm(path_3d[i] - path_3d[i - 1]))
+                if cumsum >= pre_stop_mm:
+                    split_idx = i
+                    break
+            split_idx = max(2, split_idx)
+
+            main_path = path_3d[1:split_idx]
+            tail_path = path_3d[split_idx:]
+
+            self.log_signal.emit(
+                f"预停: 末尾 {pre_stop_mm} mm 提前关电机 "
+                f"(前段 {len(main_path)} 点 + 后段 {len(tail_path)} 点)"
+            )
+
+            self._move_path(
+                main_path,
+                blend_radius=blend,
+                log_message="机械臂前段轨迹已提交到后台执行",
+                stop_motor_on_abort=True,
+            )
+
+            self.log_signal.emit("预停: 关闭喷头...")
+            self.motor.stop(emergency=False)
+            self._abort_if_requested()
+            if retract_after:
+                self.log_signal.emit(f"回抽 {p['retract']} 脉冲")
+                self.motor.backward(p["retract"], speed=50)
+                self._sleep_with_abort(0.2)
+
+            self._move_path(
+                tail_path,
+                blend_radius=0,
+                log_message="机械臂后段轨迹已提交到后台执行",
+                stop_motor_on_abort=True,
+            )
+            return
+
+        self._move_path(
+            path_3d[1:],
+            blend_radius=blend,
+            log_message="机械臂轨迹已提交到后台执行",
+            stop_motor_on_abort=True,
+        )
+
+        if retract_after:
+            self._stop_and_retract()
+        else:
+            self.log_signal.emit("停止喷头...")
+            self.motor.stop(emergency=False)
+
+    def _execute_single_trajectory(self, traj):
+        self.log_signal.emit(f"✓ {traj}")
+        self.state_signal.emit("轨迹已生成")
+        path_3d = self._trajectory_to_execution_path(traj)
+        self.log_signal.emit(f"路径点数: {len(path_3d)}")
+        self._execute_print_path(path_3d, retract_after=True)
+        self.log_signal.emit("✓ 打印完成！")
+
+    def _execute_program_step(self, step):
+        if step.step_type == STEP_TYPE_TRAVEL:
+            self._move_to_point(
+                step.params["point_xyz"],
+                log_message=f"[{step.name}] 移动到 {step.params['point_xyz']}",
+            )
+            return
+
+        if step.step_type == STEP_TYPE_PRINT_TRAJECTORY:
+            traj = step.params["trajectory"]
+            path_3d = self._trajectory_to_execution_path(
+                traj,
+                default_z=self._resolve_program_step_z(step),
+            )
+            self.log_signal.emit(f"[{step.name}] 路径点数: {len(path_3d)}")
+            self._execute_print_path(path_3d, retract_after=False)
+            return
+
+        if step.step_type == STEP_TYPE_LIFT:
+            if self._current_point is None:
+                raise RuntimeError("lift 步骤之前缺少当前点，无法执行")
+            lifted = self._current_point.copy()
+            lifted[2] += float(step.params["delta_z"])
+            self._move_to_point(
+                lifted,
+                log_message=f"[{step.name}] 抬升 {step.params['delta_z']} mm 至 {lifted.tolist()}",
+            )
+            return
+
+        if step.step_type == STEP_TYPE_RETRACT:
+            pulses = step.params["pulses"]
+            speed = step.params.get("speed", 50)
+            self.log_signal.emit(f"[{step.name}] 回抽 {pulses} 脉冲")
+            self.motor.backward(pulses, speed=speed)
+            self._sleep_with_abort(0.2)
+            return
+
+        raise ValueError(f"不支持的执行步骤类型: {step.step_type}")
+
+    def _execute_path_program(self, program):
+        self.log_signal.emit(f"✓ PathProgram '{program.name}'，共 {len(program.steps)} 步")
+        self.state_signal.emit("轨迹已生成")
+        for index, step in enumerate(program.steps, start=1):
+            self._abort_if_requested(stop_motor=True)
+            self.log_signal.emit(f"执行步骤 {index}/{len(program.steps)}: {step.name} ({step.step_type})")
+            self._execute_program_step(step)
+        self.log_signal.emit("✓ PathProgram 执行完成！")
 
     def _run_arm_motion(self, motion_fn, *args, **kwargs):
         result = {"ok": None, "error": None}
@@ -137,191 +409,18 @@ class PrintWorker(QThread):
                 pass
             self.log_signal.emit("✓ 复用已连接喷头")
 
-            # 3. 生成轨迹
             self.log_signal.emit("生成轨迹...")
-            traj_type = p["path_type"]
-            cx, cy = p["center_x"], p["center_y"]
-            is_3d = p["is_3d"]
-            layers = p["layers"] if is_3d else 1
-
-            if traj_type == "矩形填充":
-                traj = TrajectoryFactory.rectangle(
-                    center=[cx, cy, p["work_z"]],
-                    width=p["width"],
-                    height=p["height"],
-                    line_width=p["line_width"],
-                    start_corner=p.get("corner", "bottom_left"),
-                    name="矩形",
-                    is_3d=is_3d,
-                    layers=layers,
-                    layer_height=p["layer_height"],
-                )
-            elif traj_type == "矩形轮廓":
-                traj = TrajectoryFactory.rectangle_outline(
-                    center=[cx, cy, p["work_z"]],
-                    length_x=p["width"],
-                    width_y=p["height"],
-                    step_mm=1.0,
-                    name="矩形轮廓",
-                    is_3d=is_3d,
-                    layers=layers,
-                    layer_height=p["layer_height"],
-                )
-            elif traj_type == "圆形":
-                traj = TrajectoryFactory.circle(
-                    center=[cx, cy],
-                    radius=p["radius"],
-                    name="圆形",
-                    is_3d=is_3d,
-                    layers=layers,
-                )
-            elif traj_type == "弦图":
-                traj = TrajectoryFactory.chord_diagram(
-                    center=[cx, cy],
-                    radius=p["radius"],
-                    num_chords=p["num_chords"],
-                    name="弦图",
-                    is_3d=is_3d,
-                    layers=layers,
-                )
-            elif traj_type == "直线":
-                traj = TrajectoryFactory.line(
-                    start=[p["line_x1"], p["line_y1"]],
-                    end=[p["line_x2"], p["line_y2"]],
-                    step_mm=p["line_step"],
-                    name="直线",
-                )
+            program = p.get("program")
+            if program is not None:
+                self._execute_path_program(program)
             else:
-                raise ValueError(f"未知轨迹类型: {traj_type}")
-
-            self.log_signal.emit(f"✓ {traj}")
-            self.state_signal.emit("轨迹已生成")
-
-            # 4. 提取路径点
-            if traj.generated_points is not None:
-                raw = np.array(traj.generated_points, dtype=float)
-                if raw.ndim == 2 and raw.shape[1] >= 3:
-                    path_3d = raw[:, :3]
-                else:
-                    z = p["work_z"]
-                    path_3d = np.column_stack([raw, np.full(len(raw), z)])
-            else:
-                path_2d = traj.generate_path_points(step_mm=5.0)
-                z = p["work_z"]
-                path_3d = np.column_stack([path_2d, np.full(len(path_2d), z)])
-
-            self.log_signal.emit(f"路径点数: {len(path_3d)}")
-
-            if len(path_3d) < 2:
-                raise RuntimeError("路径点不足，无法执行")
-
-            # 5. 移动到起点
-            self.log_signal.emit(f"移动到起点: {path_3d[0]}")
-            self._run_arm_motion(arm.move_to_point, path_3d[0])
-            time.sleep(0.5)
-
-            if self._abort:
-                self.state_signal.emit("已中止")
-                self.finished_signal.emit(False)
-                return
-
-            # 6a. 预挤出（脉冲模式，走完自动停）
-            prime_pulses = p["prime"]
-            if prime_pulses > 0:
-                self.log_signal.emit(f"预挤出 {prime_pulses} 脉冲...")
-                motor.set_speed(p["ext_rpm"])
-                motor.forward(prime_pulses)
-                if self._abort:
-                    self.state_signal.emit("已中止")
-                    self.finished_signal.emit(False)
-                    return
-
-            # 6b. 持续挤出 + 等待出料稳定（可设0跳过）
-            ext_rpm = p["ext_rpm" ]
-            delay = p["ext_delay"]
-            if ext_rpm > 0 or delay > 0:
-                self.log_signal.emit(f"持续挤出 {ext_rpm} r/min, 等待 {delay} 秒")
-                motor.set_speed(ext_rpm)
-                motor.move(CW=False)
-                if delay > 0:
-                    time.sleep(delay)
-            else:
-                self.log_signal.emit("跳过持续挤出（速度=0 且 延迟=0）")
-
-            if self._abort:
-                motor.stop()
-                self.state_signal.emit("已中止")
-                self.finished_signal.emit(False)
-                return
-
-            # 7. 执行轨迹（支持预停距离：末尾前N mm提前关电机）
-            self.log_signal.emit("执行打印轨迹...")
-            self.state_signal.emit("打印中...")
-            blend = p["blend"]
-            pre_stop_mm = p.get("pre_stop", 0)
-
-            if pre_stop_mm > 0 and len(path_3d) > 3:
-                # 从末尾往前计算累积距离，找到拆分点
-                cumsum = 0.0
-                split_idx = len(path_3d) - 1
-                for i in range(len(path_3d) - 1, 0, -1):
-                    cumsum += float(np.linalg.norm(path_3d[i] - path_3d[i - 1]))
-                    if cumsum >= pre_stop_mm:
-                        split_idx = i
-                        break
-                split_idx = max(2, split_idx)  # 至少保留起点+1点给前段
-
-                main_path = path_3d[1:split_idx]   # 前段：电机运行
-                tail_path = path_3d[split_idx:]     # 后段：靠余压
-
-                self.log_signal.emit(
-                    f"预停: 末尾 {pre_stop_mm} mm 提前关电机 "
-                    f"(前段 {len(main_path)} 点 + 后段 {len(tail_path)} 点)"
-                )
-
-                # 走前段（电机开着）
-                self.log_signal.emit("机械臂前段轨迹已提交到后台执行")
-                self._run_arm_motion(arm.move_path, main_path, blend_radius=blend)
-
-                if self._abort:
-                    motor.stop()
-                    self.state_signal.emit("已中止")
-                    self.finished_signal.emit(False)
-                    return
-
-                # 提前关电机 + 回抽
-                self.log_signal.emit("预停: 关闭喷头...")
-                motor.stop(emergency=False)
-                retract_pulses = p["retract"]
-                self.log_signal.emit(f"回抽 {retract_pulses} 脉冲")
-                motor.backward(retract_pulses, speed=50)
-                time.sleep(0.2)
-
-                # 走后段（靠余压挤出，不用 blend 避免平滑到路径外）
-                self.log_signal.emit("机械臂后段轨迹已提交到后台执行")
-                self._run_arm_motion(arm.move_path, tail_path, blend_radius=0)
-
-                self.log_signal.emit("✓ 打印完成！（预停模式）")
-                self.state_signal.emit("完成")
-                self.finished_signal.emit(True)
-                return
-            else:
-                # 无预停：原始行为
-                self.log_signal.emit("机械臂轨迹已提交到后台执行")
-                self._run_arm_motion(arm.move_path, path_3d[1:], blend_radius=blend)
-
-            # 8. 停止喷头 + 回抽
-            self.log_signal.emit("停止喷头...")
-            motor.stop(emergency=False)
-            retract_pulses = p["retract"]
-            self.log_signal.emit(f"回抽 {retract_pulses} 脉冲")
-            motor.backward(retract_pulses, speed=50)
-            time.sleep(0.3)
-
-            self.log_signal.emit("✓ 打印完成！")
+                self._execute_single_trajectory(self._build_single_trajectory())
             self.state_signal.emit("完成")
             self.finished_signal.emit(True)
 
+        except InterruptedError:
+            self.state_signal.emit("已中止")
+            self.finished_signal.emit(False)
         except Exception as e:
             self.log_signal.emit(f"✗ 错误: {e}")
             self.state_signal.emit("出错")
@@ -347,6 +446,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self._path_3d = None       # 当前路径点 (N, 3)
         self._print_worker = None
         self._preview_program_builder = None  # 预留: 后续 UI 可切换为复合 PathProgram 预览
+        self._execution_program_builder = None  # 预留: 后续 UI 可切换为复合 PathProgram 执行
 
         # --- 路径预览图 ---
         self.figure, self.axes = plt.subplots(figsize=(4.5, 6))
@@ -735,6 +835,20 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             lift_z=lift_z,
         )
 
+    def _build_execution_program(self):
+        """
+        预留的复合打印入口。
+        当前 UI 尚未接线；后续可将 callable 赋给 self._execution_program_builder。
+        """
+        if not callable(self._execution_program_builder):
+            return None
+        program = self._execution_program_builder()
+        if program is None:
+            return None
+        if not isinstance(program, PathProgram):
+            raise TypeError("执行程序构建器必须返回 PathProgram")
+        return program
+
     def _flatten_path_program_points(self, program, default_z):
         """将 PathProgram 展平成连续的 3D 预览路径。"""
         preview_points = []
@@ -748,9 +862,6 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             traj_z = getattr(traj, "z_height", None)
             if traj_z is not None:
                 return float(traj_z)
-
-            if current_point is not None:
-                return float(current_point[2])
 
             return float(default_z)
 
@@ -853,9 +964,13 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             "corner": self.combo_corner.currentText(),
             "pre_stop": _safe_float(self.edit_prestop.text(), 0),
         }
+        params["program"] = self._build_execution_program()
 
         self._log("=" * 40)
-        self._log(f"轨迹: {params['path_type']}  中心: ({params['center_x']}, {params['center_y']})")
+        if params["program"] is None:
+            self._log(f"轨迹: {params['path_type']}  中心: ({params['center_x']}, {params['center_y']})")
+        else:
+            self._log(f"程序: {params['program'].name}  步数: {len(params['program'].steps)}")
         self._log(f"速度: {params['arm_speed']} mm/s  喷头: {params['ext_rpm']} r/min")
         if params["is_3d"]:
             self._log(f"3D模式: {params['layers']} 层, 层高 {params['layer_height']} mm")
@@ -911,7 +1026,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
 
     def closeEvent(self, event):
         if self._print_worker and self._print_worker.isRunning():
-            self._print_worker._abort = True
+            self._emergency_stop_devices()
             self._print_worker.wait(3000)
         if self.motor:
             try:
