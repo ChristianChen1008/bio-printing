@@ -447,6 +447,9 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self._print_worker = None
         self._preview_program_builder = None  # 预留: 后续 UI 可切换为复合 PathProgram 预览
         self._execution_program_builder = None  # 预留: 后续 UI 可切换为复合 PathProgram 执行
+        self._program_presets = {
+            "矩形 + 圆形": self._build_rectangle_circle_program,
+        }
 
         # --- 路径预览图 ---
         self.figure, self.axes = plt.subplots(figsize=(4.5, 6))
@@ -465,6 +468,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         # --- 信号连接 ---
         self.pb_arm_connect.clicked.connect(self._on_arm_connect)
         self.pb_ext_connect.clicked.connect(self._on_ext_connect)
+        self.combo_path_mode.currentTextChanged.connect(self._on_path_mode_changed)
+        self.combo_program_preset.currentTextChanged.connect(self._on_program_preset_changed)
         self.combo_type.currentTextChanged.connect(self._on_type_changed)
         self.cb_3d.stateChanged.connect(self._on_3d_changed)
         self.pb_preview.clicked.connect(self._on_preview)
@@ -483,6 +488,10 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._refresh_status)
         self.timer.start(200)
+
+        self._on_type_changed(self.combo_type.currentText())
+        self._on_3d_changed(self.cb_3d.checkState())
+        self._on_path_mode_changed(self.combo_path_mode.currentText())
 
         # 初始化日志
         self._log("控制台已启动。请配置参数并选择轨迹类型。")
@@ -550,10 +559,56 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self.group_circle.setVisible(t in ("圆形", "弦图"))
         self.group_line.setVisible(t == "直线")
 
+    def _set_single_trajectory_controls_enabled(self, enabled):
+        for widget in (
+            self.label_type,
+            self.combo_type,
+            self.label_center,
+            self.edit_cx,
+            self.edit_cy,
+            self.group_rect,
+            self.group_circle,
+            self.group_line,
+            self.cb_3d,
+            self.label_layers,
+            self.edit_layers,
+            self.label_layer_h,
+            self.edit_layer_h,
+            self.label_layer_h_unit,
+        ):
+            widget.setEnabled(enabled)
+
+        self.label_program_preset.setEnabled(not enabled)
+        self.combo_program_preset.setEnabled(not enabled)
+        self._on_3d_changed(self.cb_3d.checkState())
+
+    def _on_path_mode_changed(self, mode):
+        single_mode = (mode == "单条轨迹")
+        self._set_single_trajectory_controls_enabled(single_mode)
+        if single_mode:
+            self._preview_program_builder = None
+            self._execution_program_builder = None
+            return
+
+        builder = self._get_selected_program_builder()
+        self._preview_program_builder = builder
+        self._execution_program_builder = builder
+
+    def _on_program_preset_changed(self, _preset_name):
+        if self.combo_path_mode.currentText() != "复合程序":
+            return
+        builder = self._get_selected_program_builder()
+        self._preview_program_builder = builder
+        self._execution_program_builder = builder
+
+    def _get_selected_program_builder(self):
+        return self._program_presets.get(self.combo_program_preset.currentText())
+
     # ── 3D 复选框切换 ──────────────────────────────
 
     def _on_3d_changed(self, state):
-        enabled = state == QtCore.Qt.Checked
+        single_mode = self.combo_path_mode.currentText() == "单条轨迹"
+        enabled = single_mode and state == QtCore.Qt.Checked
         self.edit_layers.setEnabled(enabled)
         self.edit_layer_h.setEnabled(enabled)
 
@@ -823,12 +878,11 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             raise TypeError("预览程序构建器必须返回 PathProgram")
         return program
 
-    def _build_rectangle_circle_preview_program(self):
-        """示例复合程序构建器，供后续 UI 接线时复用。"""
+    def _build_rectangle_circle_program(self):
+        """复合程序示例：矩形 + 圆形。"""
         work_z = _safe_float(self.edit_workz.text(), 5.0)
-        layer_h = _safe_float(self.edit_layer_h.text(), 1.0)
-        safe_z = max(work_z + max(layer_h, 0.0), work_z + 1.0)
-        lift_z = max(layer_h, 1.0)
+        safe_z = max(work_z + 1.0, 1.0)
+        lift_z = 1.0
         return build_rectangle_circle_program(
             factory=TrajectoryFactory,
             safe_z=safe_z,
