@@ -32,6 +32,14 @@ if _BASE not in sys.path:
 
 from 控制代码.UR3Controller import UR3Controller
 from 控制代码.Motor import Motor
+from 控制代码.PathProgram import (
+    PathProgram,
+    STEP_TYPE_LIFT,
+    STEP_TYPE_PRINT_TRAJECTORY,
+    STEP_TYPE_RETRACT,
+    STEP_TYPE_TRAVEL,
+    build_rectangle_circle_program,
+)
 from 控制代码.Trajectory import TrajectoryFactory
 
 
@@ -49,6 +57,22 @@ def _safe_int(text, default=0):
         return int(text)
     except (ValueError, TypeError):
         return default
+
+
+def _trajectory_to_path_3d(traj, default_z):
+    """将单条 Trajectory 统一转换为 (N, 3) 预览点。"""
+    if traj.generated_points is not None:
+        raw = np.array(traj.generated_points, dtype=float)
+        if raw.ndim == 2 and raw.shape[1] >= 3:
+            return raw[:, :3]
+        if raw.ndim == 2 and raw.shape[1] == 2:
+            return np.column_stack([raw, np.full(len(raw), default_z)])
+        return np.empty((0, 3), dtype=float)
+
+    path_2d = traj.generate_path_points(step_mm=5.0)
+    if len(path_2d) == 0:
+        return np.empty((0, 3), dtype=float)
+    return np.column_stack([path_2d, np.full(len(path_2d), default_z)])
 
 
 # ==================== 打印工作线程 ====================
@@ -322,6 +346,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self._traj = None          # 当前生成的轨迹
         self._path_3d = None       # 当前路径点 (N, 3)
         self._print_worker = None
+        self._preview_program_builder = None  # 预留: 后续 UI 可切换为复合 PathProgram 预览
 
         # --- 路径预览图 ---
         self.figure, self.axes = plt.subplots(figsize=(4.5, 6))
@@ -597,11 +622,11 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 self.axes.set_ylabel("Y / mm")
                 self.axes.grid(True, color="#d8e0eb", linewidth=0.6, alpha=0.85)
                 self.axes.legend(fontsize=8)
-            self.axes.set_title(f"{self._traj}", fontsize=11, color="#20324d")
+            self.axes.set_title(self._get_preview_title(self._traj), fontsize=11, color="#20324d")
             self.figure.tight_layout(pad=1.2)
             self.canvas.draw()
 
-            total_len = self._traj.get_total_length()
+            total_len = self._get_preview_length(self._traj, self._path_3d)
             n_pts = len(self._path_3d) if self._path_3d is not None else 0
             self.label_traj_info.setText(
                 f"轨迹长度: {total_len:.1f} mm  点数: {n_pts}")
@@ -612,7 +637,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     # ── 内部：构建轨迹 ─────────────────────────────
 
     def _build_trajectory(self):
-        """根据当前面板参数构建轨迹和路径点，返回 (traj, path_3d)"""
+        """根据当前面板参数构建预览对象和路径点，返回 (traj_or_program, path_3d)"""
         traj_type = self.combo_type.currentText()
         cx = _safe_float(self.edit_cx.text(), 0)
         cy = _safe_float(self.edit_cy.text(), 0)
@@ -620,6 +645,10 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         layers = _safe_int(self.edit_layers.text(), 1) if is_3d else 1
         layer_h = _safe_float(self.edit_layer_h.text(), 1.0)
         work_z = _safe_float(self.edit_workz.text(), 5)
+
+        program = self._build_preview_program()
+        if program is not None:
+            return program, self._flatten_path_program_points(program, default_z=work_z)
 
         # corner 映射
         corner_map = {
@@ -678,18 +707,106 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 num_chords=nc,
                 name="弦图", is_3d=is_3d, layers=layers)
 
-        # 提取路径点
-        if traj.generated_points is not None:
-            raw = np.array(traj.generated_points, dtype=float)
-            if raw.ndim == 2 and raw.shape[1] >= 3:
-                path_3d = raw[:, :3]
-            else:
-                path_3d = np.column_stack([raw, np.full(len(raw), work_z)])
-        else:
-            path_2d = traj.generate_path_points(step_mm=5.0)
-            path_3d = np.column_stack([path_2d, np.full(len(path_2d), work_z)])
+        return traj, _trajectory_to_path_3d(traj, work_z)
 
-        return traj, path_3d
+    def _build_preview_program(self):
+        """
+        预留的复合路径入口。
+        当前 UI 尚未接线；后续可将 callable 赋给 self._preview_program_builder。
+        """
+        if not callable(self._preview_program_builder):
+            return None
+        program = self._preview_program_builder()
+        if program is None:
+            return None
+        if not isinstance(program, PathProgram):
+            raise TypeError("预览程序构建器必须返回 PathProgram")
+        return program
+
+    def _build_rectangle_circle_preview_program(self):
+        """示例复合程序构建器，供后续 UI 接线时复用。"""
+        work_z = _safe_float(self.edit_workz.text(), 5.0)
+        layer_h = _safe_float(self.edit_layer_h.text(), 1.0)
+        safe_z = max(work_z + max(layer_h, 0.0), work_z + 1.0)
+        lift_z = max(layer_h, 1.0)
+        return build_rectangle_circle_program(
+            factory=TrajectoryFactory,
+            safe_z=safe_z,
+            lift_z=lift_z,
+        )
+
+    def _flatten_path_program_points(self, program, default_z):
+        """将 PathProgram 展平成连续的 3D 预览路径。"""
+        preview_points = []
+        current_point = None
+
+        def _resolve_step_z(step):
+            if "work_z" in step.params:
+                return float(step.params["work_z"])
+
+            traj = step.params.get("trajectory")
+            traj_z = getattr(traj, "z_height", None)
+            if traj_z is not None:
+                return float(traj_z)
+
+            if current_point is not None:
+                return float(current_point[2])
+
+            return float(default_z)
+
+        def _append_point(point_xyz):
+            nonlocal current_point
+            point = np.array(point_xyz, dtype=float)
+            if point.shape[0] < 3:
+                point = np.pad(point, (0, 3 - point.shape[0]), constant_values=default_z)
+            point = point[:3]
+            if current_point is None or not np.allclose(current_point, point):
+                preview_points.append(point)
+            current_point = point
+
+        for step in program.steps:
+            if step.step_type == STEP_TYPE_TRAVEL:
+                _append_point(step.params["point_xyz"])
+                continue
+
+            if step.step_type == STEP_TYPE_LIFT:
+                if current_point is None:
+                    raise ValueError("lift 步骤之前缺少当前点，无法生成预览路径")
+                lifted = current_point.copy()
+                lifted[2] += float(step.params["delta_z"])
+                _append_point(lifted)
+                continue
+
+            if step.step_type == STEP_TYPE_PRINT_TRAJECTORY:
+                traj_points = _trajectory_to_path_3d(
+                    step.params["trajectory"],
+                    _resolve_step_z(step),
+                )
+                for point in traj_points:
+                    _append_point(point)
+                continue
+
+            if step.step_type == STEP_TYPE_RETRACT:
+                continue
+
+            raise ValueError(f"不支持的预览步骤类型: {step.step_type}")
+
+        if not preview_points:
+            return np.empty((0, 3), dtype=float)
+        return np.vstack(preview_points)
+
+    def _get_preview_length(self, traj_or_program, path_3d):
+        if hasattr(traj_or_program, "get_total_length"):
+            return float(traj_or_program.get_total_length())
+        if path_3d is None or len(path_3d) < 2:
+            return 0.0
+        deltas = np.diff(np.array(path_3d, dtype=float), axis=0)
+        return float(np.linalg.norm(deltas, axis=1).sum())
+
+    def _get_preview_title(self, traj_or_program):
+        if isinstance(traj_or_program, PathProgram):
+            return f"PathProgram '{traj_or_program.name}': {len(traj_or_program.steps)} 步"
+        return f"{traj_or_program}"
 
     # ── 开始打印 ──────────────────────────────────
 
