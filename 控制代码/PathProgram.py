@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+"""
+复合路径程序层
+
+本文件用于把多个单独轨迹和工艺动作组合成一个完整打印流程。
+当前已支持四类步骤：
+- travel: 空走到目标点
+- print_trajectory: 执行单条轨迹并出料
+- lift: 只抬高 Z
+- retract: 单独回抽
+
+当前已接入可视化窗口：
+- 可在界面中切换“单条轨迹 / 复合程序”
+- 可预览并执行预设复合程序
+- 第一版预设示例为“矩形 + 圆形”
+"""
+
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any, Iterable, Sequence
