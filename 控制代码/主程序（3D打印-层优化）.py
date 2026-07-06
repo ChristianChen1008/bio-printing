@@ -36,7 +36,7 @@ from UR3Controller import UR3Controller
 
 # ---- 硬件连接 ----
 ROBOT_IP        = "169.254.45.1"   # UR3机械臂IP
-SERIAL_PORT     = "COM3"           # 挤出电机串口
+SERIAL_PORT     = "COM5"           # 挤出电机串口
 BAUDRATE        = 115200           # 串口波特率
 
 # ---- 打印几何形状（矩形填充面）----

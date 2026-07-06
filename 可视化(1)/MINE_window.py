@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 3D打印综合控制台 — 窗口逻辑
 整合机械臂、喷头电机、轨迹生成，提供完整的打印控制界面。
@@ -7,6 +7,7 @@
 import sys
 import os
 import time
+import threading
 import numpy as np
 
 import matplotlib
@@ -29,9 +30,9 @@ _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BASE not in sys.path:
     sys.path.insert(0, _BASE)
 
-from 完整代码.UR3Controller import UR3Controller
-from 完整代码.Motor import Motor
-from 完整代码.Trajectory import TrajectoryFactory
+from 控制代码.UR3Controller import UR3Controller
+from 控制代码.Motor import Motor
+from 控制代码.Trajectory import TrajectoryFactory
 
 
 # ==================== 工具函数 ====================
@@ -58,35 +59,59 @@ class PrintWorker(QThread):
     state_signal = pyqtSignal(str)        # 状态变化
     finished_signal = pyqtSignal(bool)    # 完成信号 (True=成功, False=失败或中止)
 
-    def __init__(self, params):
+    def __init__(self, params, arm, motor):
         super().__init__()
         self.params = params
         self._abort = False
-        self.arm = None    # 暴露给主线程做紧急停止
-        self.motor = None
+        self.arm = arm    # 暴露给主线程做紧急停止
+        self.motor = motor
+
+    def _run_arm_motion(self, motion_fn, *args, **kwargs):
+        result = {"ok": None, "error": None}
+        done = threading.Event()
+
+        def _target():
+            try:
+                result["ok"] = motion_fn(*args, **kwargs)
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        motion_thread = threading.Thread(target=_target, daemon=True)
+        motion_thread.start()
+
+        while not done.wait(0.05):
+            if self._abort:
+                self.log_signal.emit("检测到中止请求，等待机械臂运动退出...")
+
+        if result["error"] is not None:
+            raise result["error"]
+        if result["ok"] is False:
+            raise RuntimeError("机械臂运动执行失败")
 
     def run(self):
         p = self.params
-        arm = None
-        motor = None
+        arm = self.arm
+        motor = self.motor
         try:
             self.log_signal.emit("▶ 开始打印流程...")
-            self.state_signal.emit("连接设备...")
+            self.state_signal.emit("检查设备...")
 
-            # 1. 连接机械臂
-            self.log_signal.emit(f"连接机械臂 {p['arm_ip']} ...")
-            arm = UR3Controller(robot_ip=p["arm_ip"])
-            self.arm = arm
+            if arm is None:
+                raise RuntimeError("机械臂未连接，请先点击“连接机械臂”")
+            if motor is None:
+                raise RuntimeError("喷头未连接，请先点击“连接喷头”")
+
             arm.speed = p["arm_speed"]
             arm.acceleration = p["arm_accel"]
-            self.log_signal.emit("✓ 机械臂已连接")
+            self.log_signal.emit("✓ 复用已连接机械臂")
 
-            # 2. 连接喷头电机
-            self.log_signal.emit(f"连接喷头 {p['ext_port']} @ {p['ext_baud']} ...")
-            motor = Motor(serial_port=p["ext_port"], serial_baud=p["ext_baud"])
-            self.motor = motor
-            motor.enable()
-            self.log_signal.emit("✓ 喷头电机已连接并上电")
+            try:
+                motor.enable()
+            except Exception:
+                pass
+            self.log_signal.emit("✓ 复用已连接喷头")
 
             # 3. 生成轨迹
             self.log_signal.emit("生成轨迹...")
@@ -168,7 +193,7 @@ class PrintWorker(QThread):
 
             # 5. 移动到起点
             self.log_signal.emit(f"移动到起点: {path_3d[0]}")
-            arm.move_to_point(path_3d[0])
+            self._run_arm_motion(arm.move_to_point, path_3d[0])
             time.sleep(0.5)
 
             if self._abort:
@@ -231,7 +256,8 @@ class PrintWorker(QThread):
                 )
 
                 # 走前段（电机开着）
-                arm.move_path(main_path, blend_radius=blend)
+                self.log_signal.emit("机械臂前段轨迹已提交到后台执行")
+                self._run_arm_motion(arm.move_path, main_path, blend_radius=blend)
 
                 if self._abort:
                     motor.stop()
@@ -248,7 +274,8 @@ class PrintWorker(QThread):
                 time.sleep(0.2)
 
                 # 走后段（靠余压挤出，不用 blend 避免平滑到路径外）
-                arm.move_path(tail_path, blend_radius=0)
+                self.log_signal.emit("机械臂后段轨迹已提交到后台执行")
+                self._run_arm_motion(arm.move_path, tail_path, blend_radius=0)
 
                 self.log_signal.emit("✓ 打印完成！（预停模式）")
                 self.state_signal.emit("完成")
@@ -256,7 +283,8 @@ class PrintWorker(QThread):
                 return
             else:
                 # 无预停：原始行为
-                arm.move_path(path_3d[1:], blend_radius=blend)
+                self.log_signal.emit("机械臂轨迹已提交到后台执行")
+                self._run_arm_motion(arm.move_path, path_3d[1:], blend_radius=blend)
 
             # 8. 停止喷头 + 回抽
             self.log_signal.emit("停止喷头...")
@@ -276,23 +304,9 @@ class PrintWorker(QThread):
             self.finished_signal.emit(False)
 
         finally:
-            # 清理
+            # 线程退出时不主动断开设备，连接生命周期由主窗口管理
             self.arm = None
             self.motor = None
-            if motor:
-                try:
-                    motor.stop(emergency=False)
-                    motor.disable()
-                    motor.close()
-                    self.log_signal.emit("喷头已断开")
-                except Exception:
-                    pass
-            if arm:
-                try:
-                    arm.disconnect()
-                    self.log_signal.emit("机械臂已断开")
-                except Exception:
-                    pass
 
 
 # ==================== 主窗口 ====================
@@ -335,6 +349,10 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self.pb_ext_stop.clicked.connect(self._on_ext_stop)
         self.pb_ext_retract.clicked.connect(self._on_ext_retract)
         self.pb_lift.clicked.connect(self._on_lift)
+        self.shortcut_abort = QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self)
+        self.shortcut_abort.setContext(QtCore.Qt.ApplicationShortcut)
+        self.shortcut_abort.activated.connect(self._on_abort)
+        self.pb_abort.setToolTip("按 Esc 触发紧急停止")
 
         # --- 定时刷新 ---
         self.timer = QTimer()
@@ -348,7 +366,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     # ── 端口刷新 ─────────────────────────────────────
 
     def _refresh_ports(self):
-        """刷新可用串口列表，默认选中 COM5"""
+        """刷新可用串口列表，默认选中 COM3"""
         self.combo_port.clear()
         try:
             import serial.tools.list_ports
@@ -356,11 +374,13 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             for p in sorted(ports, key=lambda x: x.device):
                 self.combo_port.addItem(p.device)
             if self.combo_port.count() == 0:
-                self.combo_port.addItem("COM5")
+                self.combo_port.addItem("COM3")
         except Exception:
             self.combo_port.addItems(["COM3", "COM4", "COM5", "COM6"])
-        # 默认选中 COM5
-        idx = self.combo_port.findText("COM5")
+        if self.combo_port.findText("COM3") < 0:
+            self.combo_port.insertItem(0, "COM3")
+        # 默认选中 COM3
+        idx = self.combo_port.findText("COM3")
         if idx >= 0:
             self.combo_port.setCurrentIndex(idx)
 
@@ -415,6 +435,9 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     # ── 机械臂连接 ─────────────────────────────────
 
     def _on_arm_connect(self):
+        if self._print_worker is not None and self._print_worker.isRunning():
+            self._log("打印进行中，暂不允许断开或重连机械臂")
+            return
         if self.arm is not None:
             # 断开
             try:
@@ -460,6 +483,9 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     # ── 喷头连接 ──────────────────────────────────
 
     def _on_ext_connect(self):
+        if self._print_worker is not None and self._print_worker.isRunning():
+            self._log("打印进行中，暂不允许断开或重连喷头")
+            return
         if self.motor is not None:
             try:
                 self.motor.disable()
@@ -501,6 +527,41 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             return
         self.motor.stop()
         self._log("喷头停止")
+
+    def _emergency_stop_devices(self):
+        stopped = False
+
+        worker = self._print_worker
+        if worker and worker.isRunning():
+            worker._abort = True
+            if worker.arm:
+                try:
+                    worker.arm.rtde_c.stopScript()
+                    stopped = True
+                except Exception:
+                    pass
+            if worker.motor:
+                try:
+                    worker.motor.stop(emergency=True)
+                    stopped = True
+                except Exception:
+                    pass
+
+        if self.arm:
+            try:
+                self.arm.rtde_c.stopScript()
+                stopped = True
+            except Exception:
+                pass
+
+        if self.motor:
+            try:
+                self.motor.stop(emergency=True)
+                stopped = True
+            except Exception:
+                pass
+
+        return stopped
 
     def _on_ext_retract(self):
         if self.motor is None:
@@ -636,31 +697,12 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         if self._print_worker is not None and self._print_worker.isRunning():
             self._log("打印已在运行中")
             return
-
-        # 先断开主窗口已有的连接，避免串口/IP冲突（worker会自行连接）
-        if self.motor is not None:
-            try:
-                self.motor.stop(emergency=False)
-                self.motor.disable()
-                self.motor.close()
-            except Exception:
-                pass
-            self.motor = None
-            self.pb_ext_connect.setText("连接喷头")
-            self._set_lamp(self.lamp_ext, False)
-            self.label_ext_state.setText("未连接")
-            self._log("已释放主窗口喷头连接")
-
-        if self.arm is not None:
-            try:
-                self.arm.disconnect()
-            except Exception:
-                pass
-            self.arm = None
-            self.pb_arm_connect.setText("连接机械臂")
-            self._set_lamp(self.lamp_arm, False)
-            self.label_arm_state.setText("未连接")
-            self._log("已释放主窗口机械臂连接")
+        if self.arm is None:
+            self._log("✗ 机械臂未连接，请先点击“连接机械臂”")
+            return
+        if self.motor is None:
+            self._log("✗ 喷头未连接，请先点击“连接喷头”")
+            return
 
         # 收集参数
         params = {
@@ -703,7 +745,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         if params["pre_stop"] > 0:
             self._log(f"预停距离: {params['pre_stop']} mm（末尾提前关电机）")
 
-        self._print_worker = PrintWorker(params)
+        self._print_worker = PrintWorker(params, self.arm, self.motor)
         self._print_worker.log_signal.connect(self._log)
         self._print_worker.state_signal.connect(self._set_print_state)
         self._print_worker.finished_signal.connect(self._on_print_finished)
@@ -717,22 +759,11 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         self._set_print_state("就绪")
 
     def _on_abort(self):
-        if self._print_worker and self._print_worker.isRunning():
-            self._print_worker._abort = True
-            self._log("⚠ 紧急停止！")
+        if self._emergency_stop_devices():
+            self._log("⚠ 紧急停止！(Esc)")
             self._set_print_state("已中止")
-            w = self._print_worker
-            # 直接停止 worker 内部连接的机械臂和电机
-            if w.arm:
-                try:
-                    w.arm.rtde_c.stopScript()
-                except Exception:
-                    pass
-            if w.motor:
-                try:
-                    w.motor.stop(emergency=True)
-                except Exception:
-                    pass
+        else:
+            self._log("Esc 已按下，但当前没有可停止的设备")
 
     # ── 定时状态刷新 ──────────────────────────────
 
@@ -745,7 +776,12 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             except Exception:
                 pass
 
-        if self.motor:
+        motor_poll_blocked = (
+            self._print_worker is not None
+            and self._print_worker.isRunning()
+        )
+
+        if self.motor and not motor_poll_blocked:
             try:
                 pos = self.motor.get_absolute_position()
                 spd = self.motor.get_current_speed()

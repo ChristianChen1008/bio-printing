@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 3D打印综合控制台 - UI 界面定义
 """
@@ -364,7 +364,7 @@ class Ui_PrintWindow(object):
             QPushButton:pressed { background:#137345; }
         """)
 
-        self.pb_abort = QtWidgets.QPushButton("紧急停止", self.group_print)
+        self.pb_abort = QtWidgets.QPushButton("紧急停止 (Esc)", self.group_print)
         self.pb_abort.setGeometry(264, 26, 210, 36)
         self.pb_abort.setFont(font_button)
         self.pb_abort.setStyleSheet("""

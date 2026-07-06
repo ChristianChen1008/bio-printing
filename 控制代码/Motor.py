@@ -143,7 +143,7 @@ class Motor:
 
     def __init__(self, serial_port, serial_baud=115200):
         self.serial = Motor_Serial(serial_port, serial_baud)
-        # self._setup_limits()  # 已禁用软件限位
+        self._setup_limits()
         # self.set_current_absolute_position(0)
  
     # ==================== 设置记忆性 ====================
@@ -506,13 +506,13 @@ class Motor:
 
 if __name__ == '__main__':
 
-    motor = Motor('COM3', 115200)
+    motor = Motor('COM5', 115200)
     motor.enable()
     # motor.go_to(40000)
-    motor.backward(9000)
+    motor.forward(9000)
     print(motor.get_absolute_position())
-    # motor.set_speed(18)
-    # motor.move(CW=True)#用了move后一定要加motor.stop(),stop用于停止运动，而close是用来关串口的，即使串口关了也不会停止
+    # motor.set_speed(1)
+    # motor.move(CW=False)#用了move后一定要加motor.stop(),stop用于停止运动，而close是用来关串口的，即使串口关了也不会停止
     # time.sleep(3)
     # motor.stop()
     motor.close()
