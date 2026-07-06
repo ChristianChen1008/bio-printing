@@ -169,7 +169,7 @@ def _validate_step_params(step_type: str, params: dict[str, Any]) -> dict[str, A
             raise ValueError("retract step requires pulses")
         validated["pulses"] = int(_as_number(validated["pulses"], param_name="pulses"))
         if "speed" in validated:
-            validated["speed"] = _as_number(validated["speed"], param_name="speed")
+            validated["speed"] = int(_as_number(validated["speed"], param_name="speed"))
         return validated
 
     return validated
