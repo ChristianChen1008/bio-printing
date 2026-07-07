@@ -1,0 +1,33 @@
+dataset:
+  name: bioprint_experiments
+  overwrite: false
+
+paths:
+  images_dir: data/raw/images
+  metadata_dir: data/raw/metadata
+  processed_dir: data/processed
+
+columns:
+  image_path: image_path
+  target: label
+
+fields:
+  numeric:
+    motion_speed:
+      display_name: motion speed
+      unit: null
+    extrusion_speed:
+      display_name: extrusion speed
+      unit: null
+    material_concentration:
+      display_name: material concentration
+      unit: null
+    print_height:
+      display_name: print height
+      unit: null
+    curvature_radius:
+      display_name: curvature radius
+      unit: null
+  categorical:
+    print_path:
+      display_name: print path
