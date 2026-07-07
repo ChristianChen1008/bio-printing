@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from src.bioprint_data.config import DatasetConfig
-from src.bioprint_data.fiftyone_io import ensure_dataset_dirs, ensure_dataset_schema
+from bioprint_data.config import DatasetConfig
+from bioprint_data.fiftyone_io import ensure_dataset_dirs, ensure_dataset_schema
 
 
 class FakeDataset:
@@ -48,7 +48,7 @@ def test_ensure_dataset_dirs_creates_expected_directories(tmp_path):
 
 
 def test_ensure_dataset_schema_adds_configured_fields(tmp_path, monkeypatch):
-    import src.bioprint_data.fiftyone_io as fiftyone_io
+    import bioprint_data.fiftyone_io as fiftyone_io
 
     monkeypatch.setattr(fiftyone_io, "_fo", lambda: FakeFiftyOne)
     dataset = FakeDataset()

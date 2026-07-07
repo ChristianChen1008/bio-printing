@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.bioprint_data.config import ConfigError, load_dataset_config
+from bioprint_data.config import ConfigError, load_dataset_config
 
 
 def write_config(path: Path, text: str) -> None:
