@@ -27,18 +27,24 @@ def create_or_load_dataset(config: DatasetConfig) -> Any:
             ensure_dataset_schema(dataset, config)
             return dataset
 
-    dataset = fo.Dataset(config.dataset_name)
+    dataset = fo.Dataset(config.dataset_name, persistent=True)
     ensure_dataset_schema(dataset, config)
     return dataset
 
 
 def ensure_dataset_schema(dataset: Any, config: DatasetConfig) -> None:
     fo = _fo()
+    existing_fields = set()
+    if hasattr(dataset, "get_field_schema"):
+        existing_fields = set(dataset.get_field_schema())
+
     for field_name in config.numeric_fields:
-        dataset.add_sample_field(field_name, fo.FloatField)
+        if field_name not in existing_fields:
+            dataset.add_sample_field(field_name, fo.FloatField)
     for field_name in config.categorical_fields:
-        dataset.add_sample_field(field_name, fo.StringField)
-    if config.target_column:
+        if field_name not in existing_fields:
+            dataset.add_sample_field(field_name, fo.StringField)
+    if config.target_column and config.target_column not in existing_fields:
         dataset.add_sample_field(config.target_column, fo.StringField)
 
 
