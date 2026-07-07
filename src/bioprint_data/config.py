@@ -54,6 +54,7 @@ def load_dataset_config(config_path: str | Path) -> DatasetConfig:
     fields = _required_mapping(raw_config, "fields")
 
     dataset_name = _required_non_empty_string(dataset, "name", "dataset.name")
+    overwrite = _optional_boolean(dataset, "overwrite", "dataset.overwrite")
     image_path_column = _required_non_empty_string(
         columns, "image_path", "columns.image_path"
     )
@@ -71,7 +72,7 @@ def load_dataset_config(config_path: str | Path) -> DatasetConfig:
         config_path=resolved_config_path,
         project_root=project_root,
         dataset_name=dataset_name,
-        overwrite=bool(dataset.get("overwrite", False)),
+        overwrite=overwrite,
         images_dir=_resolve_path(project_root, paths.get("images_dir")),
         metadata_dir=_resolve_path(project_root, paths.get("metadata_dir")),
         processed_dir=_resolve_path(project_root, paths.get("processed_dir")),
@@ -98,6 +99,18 @@ def _required_non_empty_string(
     value = config.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"Config value must be a non-empty string: {display_name}")
+    return value
+
+
+def _optional_boolean(
+    config: dict[str, Any], key: str, display_name: str, default: bool = False
+) -> bool:
+    if key not in config:
+        return default
+
+    value = config[key]
+    if not isinstance(value, bool):
+        raise ConfigError(f"{display_name} must be a boolean")
     return value
 
 

@@ -61,3 +61,27 @@ dataset:
 
     with pytest.raises(ConfigError, match="Missing required config section"):
         load_dataset_config(config_path)
+
+
+def test_load_dataset_config_rejects_non_boolean_overwrite(tmp_path):
+    config_path = tmp_path / "dataset.yaml"
+    write_config(
+        config_path,
+        """
+dataset:
+  name: broken
+  overwrite: "false"
+paths:
+  images_dir: data/raw/images
+  metadata_dir: data/raw/metadata
+  processed_dir: data/processed
+columns:
+  image_path: image_path
+fields:
+  numeric: {}
+  categorical: {}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="dataset.overwrite must be a boolean"):
+        load_dataset_config(config_path)
