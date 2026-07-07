@@ -143,7 +143,9 @@ class Motor:
 
     def __init__(self, serial_port, serial_baud=115200):
         self.serial = Motor_Serial(serial_port, serial_baud)
-        self._setup_limits()
+        # 临时停用喷头软限位的自动下发。
+        # 如需恢复，只需重新启用下面这一行。
+        # self._setup_limits()
         # self.set_current_absolute_position(0)
  
     # ==================== 设置记忆性 ====================
