@@ -27,7 +27,14 @@ def create_or_load_dataset(config: DatasetConfig) -> Any:
             ensure_dataset_schema(dataset, config)
             return dataset
 
-    dataset = fo.Dataset(config.dataset_name, persistent=True)
+    try:
+        dataset = fo.Dataset(config.dataset_name, persistent=True)
+    except Exception:
+        if not config.overwrite and fo.dataset_exists(config.dataset_name):
+            dataset = fo.load_dataset(config.dataset_name)
+            ensure_dataset_schema(dataset, config)
+            return dataset
+        raise
     ensure_dataset_schema(dataset, config)
     return dataset
 

@@ -148,6 +148,47 @@ def test_create_or_load_dataset_deletes_and_recreates_persistent_with_overwrite(
     assert fake_fo.loaded == []
 
 
+def test_create_or_load_dataset_loads_when_concurrent_create_already_exists(
+    tmp_path, monkeypatch
+):
+    import bioprint_data.fiftyone_io as fiftyone_io
+
+    class ConcurrentCreateFiftyOne(FakeFiftyOne):
+        def __init__(self):
+            super().__init__(existing=False)
+            self.exists_checks = 0
+            self.loaded_dataset = FakeDataset()
+            self.loaded_dataset.name = "bioprint_test"
+
+        def dataset_exists(self, name):
+            self.exists_checks += 1
+            return self.exists_checks > 1
+
+        def Dataset(self, name, **kwargs):
+            self.created.append((name, kwargs))
+            raise RuntimeError("already exists")
+
+        def load_dataset(self, name):
+            self.loaded.append(name)
+            return self.loaded_dataset
+
+    fake_fo = ConcurrentCreateFiftyOne()
+    monkeypatch.setattr(fiftyone_io, "_fo", lambda: fake_fo)
+    config = make_config(tmp_path)
+
+    dataset = create_or_load_dataset(config)
+
+    assert dataset is fake_fo.loaded_dataset
+    assert fake_fo.created == [("bioprint_test", {"persistent": True})]
+    assert fake_fo.loaded == ["bioprint_test"]
+    assert fake_fo.loaded_dataset.added_fields == [
+        "motion_speed",
+        "curvature_radius",
+        "print_path",
+        "label",
+    ]
+
+
 def test_ensure_dataset_schema_skips_existing_fields_from_schema(tmp_path, monkeypatch):
     import bioprint_data.fiftyone_io as fiftyone_io
 
