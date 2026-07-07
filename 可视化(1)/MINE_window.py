@@ -858,8 +858,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         elif traj_type == "直线":
             x1 = _safe_float(self.edit_line_x1.text(), 90)
             y1 = _safe_float(self.edit_line_y1.text(), 90)
-            x2 = _safe_float(self.edit_line_x2.text(), 110)
-            y2 = _safe_float(self.edit_line_y2.text(), 110)
+            x2 = _safe_float(self.edit_line_x2.text(), 120)
+            y2 = _safe_float(self.edit_line_y2.text(), 120)
             step = _safe_float(self.edit_line_step.text(), 1.0)
             traj = TrajectoryFactory.line(
                 start=[x1, y1], end=[x2, y2],
@@ -1010,8 +1010,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             "prime": _safe_int(self.edit_prime.text(), 2000),
             "work_z": _safe_float(self.edit_workz.text(), 5),
             "path_type": self.combo_type.currentText(),
-            "center_x": _safe_float(self.edit_cx.text(), 100),
-            "center_y": _safe_float(self.edit_cy.text(), 100),
+            "center_x": _safe_float(self.edit_cx.text(), 105),
+            "center_y": _safe_float(self.edit_cy.text(), 105),
             "width": _safe_float(self.edit_width.text(), 10),
             "height": _safe_float(self.edit_height.text(), 10),
             "line_width": _safe_float(self.edit_linewidth.text(), 1.0),
@@ -1019,8 +1019,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             "num_chords": _safe_int(self.edit_nchord.text(), 25),
             "line_x1": _safe_float(self.edit_line_x1.text(), 90),
             "line_y1": _safe_float(self.edit_line_y1.text(), 90),
-            "line_x2": _safe_float(self.edit_line_x2.text(), 110),
-            "line_y2": _safe_float(self.edit_line_y2.text(), 110),
+            "line_x2": _safe_float(self.edit_line_x2.text(), 120),
+            "line_y2": _safe_float(self.edit_line_y2.text(), 120),
             "line_step": _safe_float(self.edit_line_step.text(), 1.0),
             "is_3d": self.cb_3d.isChecked(),
             "layers": _safe_int(self.edit_layers.text(), 1),
