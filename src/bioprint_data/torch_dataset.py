@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -50,14 +51,31 @@ class FiftyOneBioprintDataset:
         features: list[float] = []
         for field in self.config.numeric_fields:
             value = sample.get_field(field)
-            if value is None:
-                raise ValueError(
-                    f"Missing numeric field '{field}' for sample filepath '{filepath}'"
-                )
-            features.append(float(value))
+            features.append(_coerce_numeric_feature(field, filepath, value))
         return features
 
     def _target(self, sample: Any) -> Any:
         if self.config.target_column:
             return sample.get_field(self.config.target_column)
         return None
+
+
+def _coerce_numeric_feature(field: str, filepath: str, value: Any) -> float:
+    if value is None:
+        raise ValueError(
+            f"Invalid numeric field '{field}' for sample filepath '{filepath}': {value!r}"
+        )
+
+    try:
+        converted = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid numeric field '{field}' for sample filepath '{filepath}': {value!r}"
+        ) from exc
+
+    if not math.isfinite(converted):
+        raise ValueError(
+            f"Invalid numeric field '{field}' for sample filepath '{filepath}': {value!r}"
+        )
+
+    return converted

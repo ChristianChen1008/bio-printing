@@ -70,3 +70,39 @@ def test_torch_dataset_raises_clear_error_for_missing_numeric_field(tmp_path):
 
     with pytest.raises(ValueError, match="print_height.*image.png"):
         dataset[0]
+
+
+def test_torch_dataset_raises_clear_error_for_non_convertible_numeric_field(tmp_path):
+    sample = FakeSample(
+        "image.png",
+        {
+            "motion_speed": "abc",
+            "print_height": 0.5,
+            "print_path": "arc",
+            "label": "success",
+        },
+    )
+    dataset = FiftyOneBioprintDataset(
+        [sample], make_config(tmp_path), image_loader=lambda path: f"loaded:{path}"
+    )
+
+    with pytest.raises(ValueError, match="motion_speed.*image.png.*abc"):
+        dataset[0]
+
+
+def test_torch_dataset_raises_clear_error_for_non_finite_numeric_field(tmp_path):
+    sample = FakeSample(
+        "image.png",
+        {
+            "motion_speed": 10.0,
+            "print_height": "NaN",
+            "print_path": "arc",
+            "label": "success",
+        },
+    )
+    dataset = FiftyOneBioprintDataset(
+        [sample], make_config(tmp_path), image_loader=lambda path: f"loaded:{path}"
+    )
+
+    with pytest.raises(ValueError, match="print_height.*image.png.*NaN"):
+        dataset[0]
