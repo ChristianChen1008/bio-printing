@@ -1,10 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from bioprint_data.config import DatasetConfig
 from bioprint_data.fiftyone_io import (
     create_or_load_dataset,
     ensure_dataset_dirs,
     ensure_dataset_schema,
+    load_existing_dataset,
 )
 
 
@@ -204,3 +207,38 @@ def test_ensure_dataset_schema_skips_existing_fields_from_schema(tmp_path, monke
 
     assert "motion_speed" not in dataset.added_fields
     assert dataset.added_fields == ["curvature_radius", "print_path", "label"]
+
+
+def test_load_existing_dataset_loads_without_overwrite_delete_or_create(
+    tmp_path, monkeypatch
+):
+    import bioprint_data.fiftyone_io as fiftyone_io
+
+    fake_fo = FakeFiftyOne(existing=True)
+    existing_dataset = FakeDataset()
+    existing_dataset.name = "bioprint_test"
+    fake_fo.datasets["bioprint_test"] = existing_dataset
+    monkeypatch.setattr(fiftyone_io, "_fo", lambda: fake_fo)
+    config = make_config(tmp_path, overwrite=True)
+
+    dataset = load_existing_dataset(config)
+
+    assert dataset is existing_dataset
+    assert fake_fo.loaded == ["bioprint_test"]
+    assert fake_fo.deleted == []
+    assert fake_fo.created == []
+
+
+def test_load_existing_dataset_requires_initialized_dataset(tmp_path, monkeypatch):
+    import bioprint_data.fiftyone_io as fiftyone_io
+
+    fake_fo = FakeFiftyOne(existing=False)
+    monkeypatch.setattr(fiftyone_io, "_fo", lambda: fake_fo)
+    config = make_config(tmp_path)
+
+    with pytest.raises(ValueError, match="Run scripts/init_fiftyone_dataset.py first"):
+        load_existing_dataset(config)
+
+    assert fake_fo.loaded == []
+    assert fake_fo.deleted == []
+    assert fake_fo.created == []

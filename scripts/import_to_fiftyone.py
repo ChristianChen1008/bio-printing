@@ -10,7 +10,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from bioprint_data.config import load_dataset_config
-from bioprint_data.fiftyone_io import create_or_load_dataset, ensure_dataset_dirs
+from bioprint_data.fiftyone_io import ensure_dataset_dirs
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +34,6 @@ def main() -> None:
     args = parse_args()
     config = load_dataset_config(Path(args.config))
     ensure_dataset_dirs(config)
-    create_or_load_dataset(config)
 
     if args.metadata is None:
         print("No metadata table provided. Dataset schema is ready for future import.")

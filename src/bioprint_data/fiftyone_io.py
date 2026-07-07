@@ -39,6 +39,18 @@ def create_or_load_dataset(config: DatasetConfig) -> Any:
     return dataset
 
 
+def load_existing_dataset(config: DatasetConfig) -> Any:
+    fo = _fo()
+    if not fo.dataset_exists(config.dataset_name):
+        raise ValueError(
+            f"FiftyOne dataset does not exist: {config.dataset_name}. "
+            "Run scripts/init_fiftyone_dataset.py first."
+        )
+    dataset = fo.load_dataset(config.dataset_name)
+    ensure_dataset_schema(dataset, config)
+    return dataset
+
+
 def ensure_dataset_schema(dataset: Any, config: DatasetConfig) -> None:
     fo = _fo()
     existing_fields = set()

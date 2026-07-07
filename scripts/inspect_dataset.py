@@ -10,7 +10,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from bioprint_data.config import load_dataset_config
-from bioprint_data.fiftyone_io import create_or_load_dataset, dataset_summary
+from bioprint_data.fiftyone_io import dataset_summary, load_existing_dataset
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_dataset_config(Path(args.config))
-    dataset = create_or_load_dataset(config)
+    dataset = load_existing_dataset(config)
     summary = dataset_summary(dataset, config)
 
     print(f"Dataset: {summary['name']}")
