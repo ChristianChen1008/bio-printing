@@ -4,8 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src"
+DATABASE_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = DATABASE_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="configs/dataset.yaml",
+        default="database/configs/dataset.yaml",
         help="Path to the dataset configuration file.",
     )
     return parser.parse_args()
