@@ -50,6 +50,7 @@ from 控制代码.PathProgram import (
     STEP_TYPE_TRAVEL,
     build_rectangle_circle_program,
 )
+from 控制代码.SafePosition import DEFAULT_SAFE_POINT, build_safe_lift_path
 from 控制代码.Trajectory import TrajectoryFactory
 
 
@@ -143,6 +144,23 @@ class PrintWorker(QThread):
         self._run_arm_motion(self.arm.move_path, path_3d, blend_radius=blend_radius)
         self._current_point = np.array(path_3d[-1], dtype=float)[:3]
         self._abort_if_requested(stop_motor=stop_motor_on_abort)
+
+    def _move_to_safe_position(self):
+        if self._current_point is None:
+            current_point = np.array(self.arm.get_tcp()[:3], dtype=float)
+        else:
+            current_point = np.array(self._current_point, dtype=float)[:3]
+
+        safe_path = build_safe_lift_path(current_point, DEFAULT_SAFE_POINT)
+        self.log_signal.emit("打印结束，自动抬高到安全位置...")
+        for index, point in enumerate(safe_path):
+            is_vertical_lift = len(safe_path) == 2 and index == 0
+            message = (
+                f"先垂直抬高到安全高度: {point}"
+                if is_vertical_lift
+                else f"移动到安全位置: {point}"
+            )
+            self._move_to_point(point, log_message=message)
 
     def _build_single_trajectory(self):
         p = self.params
@@ -425,6 +443,7 @@ class PrintWorker(QThread):
                 self._execute_path_program(program)
             else:
                 self._execute_single_trajectory(self._build_single_trajectory())
+            self._move_to_safe_position()
             self.state_signal.emit("完成")
             self.finished_signal.emit(True)
 
