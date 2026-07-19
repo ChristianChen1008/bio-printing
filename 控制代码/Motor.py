@@ -345,8 +345,22 @@ class Motor:
         设置速度
         :param speed: 速度，0~10000 r/min
         """
-        speed = max(0, min(10000, speed))
-        self.serial.write_single(0x009A, speed)
+        try:
+            speed_value = float(speed)
+        except (TypeError, ValueError):
+            speed_value = 0.0
+        speed_value = max(0.0, min(10000.0, speed_value))
+
+        # The motor speed register is a single WORD, so the transmitted value
+        # must remain an integer even when the UI accepts decimal rpm input.
+        if speed_value == 0:
+            register_speed = 0
+        elif speed_value < 1:
+            register_speed = 1
+        else:
+            register_speed = int(speed_value + 0.5)
+        self.serial.write_single(0x009A, register_speed)
+        return register_speed
 
     def get_absolute_position(self):
         """
@@ -511,7 +525,7 @@ if __name__ == '__main__':
     motor = Motor('COM5', 115200)
     motor.enable()
     # motor.go_to(40000)
-    motor.backward(2000)
+    motor.backward(1000)
     print(motor.get_absolute_position())
     # motor.set_speed(1)
     # motor.move(CW=False)#用了move后一定要加motor.stop(),stop用于停止运动，而close是用来关串口的，即使串口关了也不会停止

@@ -247,9 +247,11 @@ class PrintWorker(QThread):
         ext_rpm = p["ext_rpm"]
         delay = p["ext_delay"]
         if ext_rpm > 0 or delay > 0:
-            self.log_signal.emit(f"持续挤出 {ext_rpm} r/min, 等待 {delay} 秒")
-            motor.set_speed(ext_rpm)
+            self.log_signal.emit(f"持续挤出 {ext_rpm:g} r/min, 等待 {delay} 秒")
+            sent_rpm = motor.set_speed(ext_rpm)
             motor.move(CW=False)
+            if sent_rpm != ext_rpm:
+                self.log_signal.emit(f"电机寄存器实际下发 {sent_rpm:g} r/min")
             if delay > 0:
                 self._sleep_with_abort(delay, stop_motor=True)
         else:
@@ -529,7 +531,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
     # ── 端口刷新 ─────────────────────────────────────
 
     def _refresh_ports(self):
-        """刷新可用串口列表，默认选中 COM3"""
+        """刷新可用串口列表，默认选中 COM5"""
         self.combo_port.clear()
         try:
             import serial.tools.list_ports
@@ -537,13 +539,13 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             for p in sorted(ports, key=lambda x: x.device):
                 self.combo_port.addItem(p.device)
             if self.combo_port.count() == 0:
-                self.combo_port.addItem("COM3")
+                self.combo_port.addItem("COM5")
         except Exception:
             self.combo_port.addItems(["COM3", "COM4", "COM5", "COM6"])
-        if self.combo_port.findText("COM3") < 0:
-            self.combo_port.insertItem(0, "COM3")
-        # 默认选中 COM3
-        idx = self.combo_port.findText("COM3")
+        if self.combo_port.findText("COM5") < 0:
+            self.combo_port.insertItem(0, "COM5")
+        # 默认选中 COM5
+        idx = self.combo_port.findText("COM5")
         if idx >= 0:
             self.combo_port.setCurrentIndex(idx)
 
@@ -726,10 +728,12 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         if self.motor is None:
             self._log("✗ 喷头未连接")
             return
-        rpm = _safe_int(self.edit_ext_rpm.text(), 1)
-        self.motor.set_speed(rpm)
+        rpm = _safe_float(self.edit_ext_rpm.text(), 1.0)
+        sent_rpm = self.motor.set_speed(rpm)
         self.motor.move(CW=False)
-        self._log(f"喷头启动 {rpm} r/min")
+        self._log(f"喷头启动 {rpm:g} r/min")
+        if sent_rpm != rpm:
+            self._log(f"电机寄存器实际下发 {sent_rpm:g} r/min")
 
     def _on_ext_stop(self):
         if self.motor is None:
@@ -842,8 +846,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
         corner = corner_map.get(self.combo_corner.currentText(), "bottom_left")
 
         if traj_type == "矩形填充":
-            w = _safe_float(self.edit_width.text(), 10)
-            h = _safe_float(self.edit_height.text(), 10)
+            w = _safe_float(self.edit_width.text(), 30)
+            h = _safe_float(self.edit_height.text(), 30)
             lw = _safe_float(self.edit_linewidth.text(), 1.0)
             traj = TrajectoryFactory.rectangle(
                 center=[cx, cy, work_z],
@@ -857,8 +861,8 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
                 layer_height=layer_h,
             )
         elif traj_type == "矩形轮廓":
-            w = _safe_float(self.edit_width.text(), 100)
-            h = _safe_float(self.edit_height.text(), 100)
+            w = _safe_float(self.edit_width.text(), 30)
+            h = _safe_float(self.edit_height.text(), 30)
             traj = TrajectoryFactory.rectangle_outline(
                 center=[cx, cy, work_z],
                 length_x=w,
@@ -1020,19 +1024,19 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             "arm_ip": self.edit_ip.text().strip(),
             "arm_speed": _safe_float(self.edit_speed.text(), 10),
             "arm_accel": _safe_float(self.edit_accel.text(), 1000),
-            "blend": _safe_float(self.edit_blend.text(), 0.002),
+            "blend": _safe_float(self.edit_blend.text(), 0),
             "ext_port": self.combo_port.currentText().strip(),
             "ext_baud": _safe_int(self.combo_baud.currentText(), 115200),
-            "ext_rpm": _safe_int(self.edit_ext_rpm.text(), 1),
-            "ext_delay": _safe_float(self.edit_delay.text(), 3),
+            "ext_rpm": _safe_float(self.edit_ext_rpm.text(), 1.0),
+            "ext_delay": _safe_float(self.edit_delay.text(), 1),
             "retract": _safe_int(self.edit_retract.text(), 2000),
             "prime": _safe_int(self.edit_prime.text(), 2000),
             "work_z": _safe_float(self.edit_workz.text(), 5),
             "path_type": self.combo_type.currentText(),
             "center_x": _safe_float(self.edit_cx.text(), 105),
             "center_y": _safe_float(self.edit_cy.text(), 105),
-            "width": _safe_float(self.edit_width.text(), 10),
-            "height": _safe_float(self.edit_height.text(), 10),
+            "width": _safe_float(self.edit_width.text(), 30),
+            "height": _safe_float(self.edit_height.text(), 30),
             "line_width": _safe_float(self.edit_linewidth.text(), 1.0),
             "radius": _safe_float(self.edit_radius_c.text(), 90),
             "num_chords": _safe_int(self.edit_nchord.text(), 25),
@@ -1054,7 +1058,7 @@ class PrintWindow(QtWidgets.QMainWindow, Ui_PrintWindow):
             self._log(f"轨迹: {params['path_type']}  中心: ({params['center_x']}, {params['center_y']})")
         else:
             self._log(f"程序: {params['program'].name}  步数: {len(params['program'].steps)}")
-        self._log(f"速度: {params['arm_speed']} mm/s  喷头: {params['ext_rpm']} r/min")
+        self._log(f"速度: {params['arm_speed']} mm/s  喷头: {params['ext_rpm']:g} r/min")
         if params["is_3d"]:
             self._log(f"3D模式: {params['layers']} 层, 层高 {params['layer_height']} mm")
         if params["pre_stop"] > 0:
