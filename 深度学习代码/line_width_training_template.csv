@@ -1,0 +1,7 @@
+arm_speed,extrusion_speed,nozzle_height,alginate_concentration,nozzle_diameter,line_width
+10,1.2,0.8,2.0,0.41,0.85
+15,1.2,0.8,2.0,0.41,0.78
+10,1.6,0.8,2.0,0.41,0.96
+10,1.2,1.0,2.0,0.41,0.74
+10,1.2,0.8,3.0,0.41,0.91
+10,1.2,0.8,2.0,0.60,1.12
