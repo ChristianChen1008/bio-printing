@@ -1,0 +1,11 @@
+image,sample_id,side,x,y,width_px,width_mm,kept,reject_reason
+D:\bio-print\database\data\raw\images\test.jpg,1,top,729,548,56.0,5.598405402107147,True,
+D:\bio-print\database\data\raw\images\test.jpg,2,top,749,556,72.0,7.197949802709189,True,
+D:\bio-print\database\data\raw\images\test.jpg,3,top,769,556,72.0,7.197949802709189,True,
+D:\bio-print\database\data\raw\images\test.jpg,4,top,789,568,80.0,7.99772200301021,True,
+D:\bio-print\database\data\raw\images\test.jpg,5,bottom,675,736,20.0,1.9994305007525526,True,
+D:\bio-print\database\data\raw\images\test.jpg,6,bottom,695,728,47.0,4.6986616767684986,True,
+D:\bio-print\database\data\raw\images\test.jpg,7,bottom,715,740,22.0,2.199373550827808,True,
+D:\bio-print\database\data\raw\images\test.jpg,8,left,612,538,22.0,2.199373550827808,True,
+D:\bio-print\database\data\raw\images\test.jpg,9,right,813,751,35.0,3.499003376316967,True,
+D:\bio-print\database\data\raw\images\test.jpg,10,right,815,757,31.0,3.0991172761664565,True,

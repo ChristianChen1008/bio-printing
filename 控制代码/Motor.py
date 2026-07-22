@@ -525,7 +525,7 @@ if __name__ == '__main__':
     motor = Motor('COM5', 115200)
     motor.enable()
     # motor.go_to(40000)
-    motor.backward(1000)
+    motor.backward(2000)
     print(motor.get_absolute_position())
     # motor.set_speed(1)
     # motor.move(CW=False)#用了move后一定要加motor.stop(),stop用于停止运动，而close是用来关串口的，即使串口关了也不会停止

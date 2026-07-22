@@ -16,9 +16,8 @@ from line_width_measure import (
 
 
 # Change these two values before running in VS Code.
-IMAGE_PATH = r"C:\your\image\path\photo.jpg"
-KNOWN_WIDTH_MM = 10.0
-
+IMAGE_PATH = r"D:\bio-print\database\data\raw\images\test.jpg"
+KNOWN_WIDTH_MM = 19.2
 
 # These defaults fit black-background, yellow/bright printed lines.
 REF_AXIS = "width"  # use "height" if the known size is the reference object's height
