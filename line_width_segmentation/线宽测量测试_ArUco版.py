@@ -5,47 +5,188 @@ import math
 import cv2
 import numpy as np
 
-from line_width_measure import (
-    allocate_samples,
-    clean_mask,
-    draw_annotation,
-    measure_at,
-    reject_outliers,
-    sample_positions,
-    summarize,
-)
 
+# ===================== 你主要改这里 =====================
 
-# 只需要改这两个值。
+# 输入图片路径。可以改成你的任意一张图片。
 IMAGE_PATH = r"D:\bio-print\database\data\raw\images\test.jpg"
 
-# 填你实际量到的 ArUco 黑色大方块外边长，不是白纸宽度。
+# ArUco 黑色大方块的真实边长，单位 mm。
+# 注意：填黑色方块外边缘到外边缘的尺寸，不是白色纸片总宽度。
 MARKER_SIZE_MM = 19.2
 
+# 输出文件夹。程序会生成：
+# annotated_原图名.png、line_mask_原图名.png、result_原图名.csv
+OUTPUT_DIR = Path(r"D:\bio-print\database\data\raw\images\annotated_pictures")
 
-# 一张图取多少个线宽点。
+# 每张图一共取多少个宽度点。
 SAMPLES = 10
-EDGE_MARGIN_FRACTION = 0.25
 
-# 如果自动分割不好，可以改成 "dark" 或 "yellow_green" 试试。
+# 选择要测量的段编号：
+# 1=右边下半段，2=右边上半段，3=上边右半段，4=上边左半段
+# 5=左边上半段，6=左边下半段，7=下边左半段，8=下边右半段
+# 可以写 "1"，也可以写 "1,2,8"。
+# 留空 "" 时，程序运行后会在 VS Code 终端里让你输入。
+SELECTED_SEGMENTS = "2,3,4,5,6,7"
+
+# 如果自动分割不理想，可改成 "yellow_green"、"dark"、"bright" 或 "color_excess"。
 LINE_MODE = "auto"
 
-# 如果自动找打印线失败，可以手动填打印区域: x, y, 宽, 高。
-# 不需要时保持 None。
+# 如果自动找打印图案区域失败，可以临时手动填 x, y, 宽, 高；正常保持 None。
 LINE_BBOX = None
 
+# 可选：按经验剔除极端线宽。单位 mm；不需要就保持 None。
 MIN_WIDTH_MM = None
 MAX_WIDTH_MM = None
 
-# 输出文件夹。可以改成你想保存结果的 D 盘文件夹。
-# 例如: OUTPUT_DIR = Path(r"D:\bio-print\line_width_segmentation\measurement_outputs")
-OUTPUT_DIR = Path(r"D:\bio-print\database\data\raw\images\annotated_pictures")
+# Coordinate mode:
+# "click_origin_30mm": click the real (0, 0) origin, then build a 30 mm square.
+# "manual_origin_30mm": use MANUAL_ORIGIN_PX directly, no click window.
+# "auto_bbox": old method, estimate the rectangle from the printed line mask.
+COORDINATE_MODE = "click_origin_30mm"
+PATTERN_SIZE_MM = 30.0
+MANUAL_ORIGIN_PX = None
+
+
+# ===================== 基础工具函数 =====================
+
+def clean_mask(mask):
+    kernel3 = np.ones((3, 3), np.uint8)
+    kernel5 = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel3, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel5, iterations=2)
+    return mask.astype(bool)
+
+
+def contiguous_runs(indices):
+    if len(indices) == 0:
+        return []
+    runs = []
+    start = int(indices[0])
+    previous = int(indices[0])
+    for value in indices[1:]:
+        value = int(value)
+        if value == previous + 1:
+            previous = value
+        else:
+            runs.append((start, previous))
+            start = previous = value
+    runs.append((start, previous))
+    return runs
+
+
+def sample_positions(start, end, count, margin):
+    usable_start = int(start + margin)
+    usable_end = int(end - margin)
+    if usable_end <= usable_start:
+        usable_start, usable_end = int(start), int(end)
+    return np.linspace(usable_start, usable_end, count + 2, dtype=int)[1:-1]
+
+
+def measure_at(mask, side, x, y, bbox):
+    x0, y0, x1, y1 = bbox
+    if side in ("top", "bottom"):
+        if x < x0 or x > x1:
+            return None
+        ys = np.flatnonzero(mask[y0 : y1 + 1, x]) + y0
+        runs = contiguous_runs(ys)
+        if not runs:
+            return None
+        run = min(runs, key=lambda r: r[0]) if side == "top" else max(runs, key=lambda r: r[1])
+        center = (run[0] + run[1]) / 2.0
+        return {
+            "side": side,
+            "x": int(x),
+            "y": int(round(center)),
+            "width_px": float(run[1] - run[0] + 1),
+        }
+
+    if y < y0 or y > y1:
+        return None
+    xs = np.flatnonzero(mask[y, x0 : x1 + 1]) + x0
+    runs = contiguous_runs(xs)
+    if not runs:
+        return None
+    run = min(runs, key=lambda r: r[0]) if side == "left" else max(runs, key=lambda r: r[1])
+    center = (run[0] + run[1]) / 2.0
+    return {
+        "side": side,
+        "x": int(round(center)),
+        "y": int(y),
+        "width_px": float(run[1] - run[0] + 1),
+    }
+
+
+def reject_outliers(rows, min_mm=None, max_mm=None):
+    for row in rows:
+        value = row["width_mm"]
+        if min_mm is not None and value < min_mm:
+            row["kept"] = False
+            row["reject_reason"] = "below_min"
+        elif max_mm is not None and value > max_mm:
+            row["kept"] = False
+            row["reject_reason"] = "above_max"
+        else:
+            row["kept"] = True
+            row["reject_reason"] = ""
+
+    candidate_values = np.array([r["width_mm"] for r in rows if r["kept"]], dtype=float)
+    if len(candidate_values) >= 5:
+        median = float(np.median(candidate_values))
+        mad = float(np.median(np.abs(candidate_values - median)))
+        if mad > 1e-9:
+            for row in rows:
+                if not row["kept"]:
+                    continue
+                robust_z = 0.6745 * abs(row["width_mm"] - median) / mad
+                if robust_z > 3.5:
+                    row["kept"] = False
+                    row["reject_reason"] = "outlier"
+    return rows
+
+
+def summarize(rows):
+    kept_values = np.array([r["width_mm"] for r in rows if r["kept"]], dtype=float)
+    if len(kept_values) == 0:
+        return {"n_kept": 0, "mean_mm": math.nan, "std_mm": math.nan, "median_mm": math.nan}
+    return {
+        "n_kept": int(len(kept_values)),
+        "mean_mm": float(np.mean(kept_values)),
+        "std_mm": float(np.std(kept_values, ddof=1)) if len(kept_values) > 1 else 0.0,
+        "median_mm": float(np.median(kept_values)),
+    }
+
+
+def parse_selected_segments(text):
+    text = str(text).strip()
+    if not text:
+        print()
+        print("请输入要测量的段编号，例如：1 或 1,2,8")
+        print("1=右下  2=右上  3=上右  4=上左  5=左上  6=左下  7=下左  8=下右")
+        text = input("段编号: ").strip()
+
+    text = text.replace("，", ",").replace(" ", ",")
+    values = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = int(part)
+        if value < 1 or value > 8:
+            raise ValueError("段编号只能是 1 到 8。")
+        if value not in values:
+            values.append(value)
+
+    if not values:
+        raise ValueError("至少需要选择一个段编号。")
+    return values
+
+
+# ===================== ArUco 定标 =====================
 
 def aruco_dictionary():
     if not hasattr(cv2, "aruco"):
-        raise RuntimeError(
-            "当前 Python 的 OpenCV 没有 aruco 模块。请安装 opencv-contrib-python。"
-        )
+        raise RuntimeError("当前 OpenCV 没有 aruco 模块，请安装 opencv-contrib-python。")
     return cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
 
@@ -60,9 +201,7 @@ def detect_aruco_marker(image):
         corners, ids, _ = cv2.aruco.detectMarkers(gray, dictionary)
 
     if ids is None or len(ids) == 0:
-        raise RuntimeError(
-            "没有识别到 ArUco 标记。请确认四个角完整、清楚、没有反光遮挡。"
-        )
+        raise RuntimeError("没有识别到 ArUco 标记，请确认四个角完整、清晰、没有强反光遮挡。")
 
     ids_flat = ids.flatten()
     chosen_index = int(np.where(ids_flat == 0)[0][0]) if 0 in ids_flat else 0
@@ -83,6 +222,8 @@ def detect_aruco_marker(image):
         "side_px": side_px,
     }
 
+
+# ===================== 打印线自动分割 =====================
 
 def expand_bbox(bbox, pad, width, height):
     x, y, w, h = bbox
@@ -142,10 +283,9 @@ def component_candidates(mask, marker_bbox, marker_side_px, manual_bbox=None):
         bbox_area = max(1, w * h)
         fill = area / bbox_area
         aspect = max(w / max(1, h), h / max(1, w))
-        if fill > 0.75 or aspect > 6:
+        if fill > 0.75 or aspect > 7:
             continue
 
-        # 矩形打印轨迹通常是“大外框、低填充率”的连通区域。
         size_score = math.sqrt(bbox_area)
         fill_score = 1.0 / (1.0 + abs(fill - 0.12) * 5.0)
         aspect_score = 1.0 / math.sqrt(aspect)
@@ -172,28 +312,27 @@ def make_line_masks(image, marker_bbox, marker_side_px, manual_bbox=None):
     x, y, w, h = expand_bbox(marker_bbox, int(marker_side_px * 0.12), width, height)
     marker_excluded[y : y + h, x : x + w] = False
 
-    masks = []
-
     yellow_green = (
         (hsv[:, :, 0] >= 18)
         & (hsv[:, :, 0] <= 100)
         & (hsv[:, :, 1] >= 12)
         & (hsv[:, :, 2] >= 55)
     )
-    masks.append(("yellow_green", yellow_green))
-
     color_excess = (
         (g.astype(np.int16) > b.astype(np.int16) + 4)
         & (r.astype(np.int16) > b.astype(np.int16) + 2)
         & (gray > 45)
     )
-    masks.append(("color_excess", color_excess))
 
-    masks.append(("dark", blur < otsu))
-    masks.append(("bright", blur > otsu))
+    raw_masks = [
+        ("yellow_green", yellow_green),
+        ("color_excess", color_excess),
+        ("dark", blur < otsu),
+        ("bright", blur > otsu),
+    ]
 
     cleaned = []
-    for name, raw in masks:
+    for name, raw in raw_masks:
         if LINE_MODE != "auto" and name != LINE_MODE:
             continue
         mask = clean_mask(raw & marker_excluded)
@@ -219,31 +358,14 @@ def detect_line_mask(image, marker_bbox, marker_side_px):
             best_name = name
 
     if best is None:
-        raise RuntimeError(
-            "没有自动分割到打印线。请尝试调整 LINE_MODE，或临时填写 LINE_BBOX。"
-        )
+        raise RuntimeError("没有自动分割到打印线，请尝试调整 LINE_MODE，或临时填写 LINE_BBOX。")
 
     _, label, bbox, _, _, _ = best
     component = best_labels == label
     return component, bbox, best_name
 
 
-def contiguous_index_runs(indices):
-    if len(indices) == 0:
-        return []
-    runs = []
-    start = int(indices[0])
-    previous = int(indices[0])
-    for value in indices[1:]:
-        value = int(value)
-        if value == previous + 1:
-            previous = value
-        else:
-            runs.append((start, previous))
-            start = previous = value
-    runs.append((start, previous))
-    return runs
-
+# ===================== 八段坐标系测量逻辑 =====================
 
 def estimate_frame_bbox(mask):
     ys, xs = np.where(mask)
@@ -256,8 +378,8 @@ def estimate_frame_bbox(mask):
 
     row_threshold = max(8.0, float(row_smooth.max()) * 0.22)
     col_threshold = max(8.0, float(col_smooth.max()) * 0.18)
-    row_runs = contiguous_index_runs(np.flatnonzero(row_smooth >= row_threshold))
-    col_runs = contiguous_index_runs(np.flatnonzero(col_smooth >= col_threshold))
+    row_runs = contiguous_runs(np.flatnonzero(row_smooth >= row_threshold))
+    col_runs = contiguous_runs(np.flatnonzero(col_smooth >= col_threshold))
 
     row_runs = [run for run in row_runs if run[1] - run[0] + 1 >= 4]
     col_runs = [run for run in col_runs if run[1] - run[0] + 1 >= 4]
@@ -279,21 +401,33 @@ def estimate_frame_bbox(mask):
     return (x0, y0, x1, y1)
 
 
-def build_edge_profile(mask, side, bbox):
+def build_segment_defs(bbox):
     x0, y0, x1, y1 = bbox
+    xm = int(round((x0 + x1) / 2.0))
+    ym = int(round((y0 + y1) / 2.0))
+    return {
+        1: {"side": "right", "start": ym, "end": y1, "name": "right_lower", "p1": (x1, y1), "p2": (x1, ym), "coord_start": (0, 0), "coord_end": (0, 15)},
+        2: {"side": "right", "start": y0, "end": ym, "name": "right_upper", "p1": (x1, ym), "p2": (x1, y0), "coord_start": (0, 15), "coord_end": (0, 30)},
+        3: {"side": "top", "start": xm, "end": x1, "name": "top_right", "p1": (x1, y0), "p2": (xm, y0), "coord_start": (0, 30), "coord_end": (15, 30)},
+        4: {"side": "top", "start": x0, "end": xm, "name": "top_left", "p1": (xm, y0), "p2": (x0, y0), "coord_start": (15, 30), "coord_end": (30, 30)},
+        5: {"side": "left", "start": y0, "end": ym, "name": "left_upper", "p1": (x0, y0), "p2": (x0, ym), "coord_start": (30, 30), "coord_end": (30, 15)},
+        6: {"side": "left", "start": ym, "end": y1, "name": "left_lower", "p1": (x0, ym), "p2": (x0, y1), "coord_start": (30, 15), "coord_end": (30, 0)},
+        7: {"side": "bottom", "start": x0, "end": xm, "name": "bottom_left", "p1": (x0, y1), "p2": (xm, y1), "coord_start": (30, 0), "coord_end": (15, 0)},
+        8: {"side": "bottom", "start": xm, "end": x1, "name": "bottom_right", "p1": (xm, y1), "p2": (x1, y1), "coord_start": (15, 0), "coord_end": (0, 0)},
+    }
+
+
+def build_segment_profile(mask, segment, bbox):
+    side = segment["side"]
     profile = []
-    if side in ("top", "bottom"):
-        for x in range(x0, x1 + 1):
-            result = measure_at(mask, side, x, y0 if side == "top" else y1, bbox)
-            if result:
-                result["coord"] = x
-                profile.append(result)
-    else:
-        for y in range(y0, y1 + 1):
-            result = measure_at(mask, side, x0 if side == "left" else x1, y, bbox)
-            if result:
-                result["coord"] = y
-                profile.append(result)
+    for coord in range(int(segment["start"]), int(segment["end"]) + 1):
+        if side in ("top", "bottom"):
+            result = measure_at(mask, side, coord, bbox[1] if side == "top" else bbox[3], bbox)
+        else:
+            result = measure_at(mask, side, bbox[0] if side == "left" else bbox[2], coord, bbox)
+        if result:
+            result["coord"] = coord
+            profile.append(result)
     return profile
 
 
@@ -311,64 +445,57 @@ def robust_width_limits(widths):
     return max(1.0, lower), max(2.0, upper)
 
 
-def stable_segments_for_side(mask, side, bbox):
-    profile = build_edge_profile(mask, side, bbox)
-    if len(profile) < 8:
-        return []
+def stable_segments_inside_selected(mask, bbox, selected_numbers):
+    segment_defs = build_segment_defs(bbox)
+    stable_segments = []
 
-    widths = [row["width_px"] for row in profile]
-    lower, upper = robust_width_limits(widths)
-    valid_coords = [
-        row["coord"]
-        for row in profile
-        if lower <= row["width_px"] <= upper
-    ]
-    coord_to_row = {row["coord"]: row for row in profile}
-    runs = contiguous_index_runs(np.array(valid_coords, dtype=np.int32))
-
-    x0, y0, x1, y1 = bbox
-    span = (x1 - x0 + 1) if side in ("top", "bottom") else (y1 - y0 + 1)
-    min_run_length = max(8, int(span * 0.08))
-    segments = []
-    for start, end in runs:
-        selected = [
-            coord_to_row[coord]
-            for coord in range(start, end + 1)
-            if coord in coord_to_row
-        ]
-        if len(selected) < min_run_length:
+    for number in selected_numbers:
+        segment = segment_defs[number].copy()
+        profile = build_segment_profile(mask, segment, bbox)
+        if len(profile) < 5:
             continue
-        selected_widths = np.array([row["width_px"] for row in selected], dtype=np.float32)
-        mean_width = float(np.mean(selected_widths))
-        std_width = float(np.std(selected_widths))
-        cv = std_width / max(1e-6, mean_width)
-        score = len(selected) / (1.0 + cv * 10.0)
-        segments.append(
-            {
-                "side": side,
-                "start": int(start),
-                "end": int(end),
-                "length": int(end - start + 1),
-                "mean_width_px": mean_width,
-                "std_width_px": std_width,
-                "score": score,
-            }
-        )
 
-    segments.sort(key=lambda item: item["score"], reverse=True)
-    return segments
+        widths = [row["width_px"] for row in profile]
+        lower, upper = robust_width_limits(widths)
+        coord_to_row = {row["coord"]: row for row in profile}
+        valid_coords = [
+            row["coord"]
+            for row in profile
+            if lower <= row["width_px"] <= upper
+        ]
 
+        runs = contiguous_runs(np.array(valid_coords, dtype=np.int32))
+        span = int(segment["end"] - segment["start"] + 1)
+        min_run_length = max(5, int(span * 0.12))
+        for start, end in runs:
+            selected = [
+                coord_to_row[coord]
+                for coord in range(start, end + 1)
+                if coord in coord_to_row
+            ]
+            if len(selected) < min_run_length:
+                continue
+            selected_widths = np.array([row["width_px"] for row in selected], dtype=np.float32)
+            mean_width = float(np.mean(selected_widths))
+            std_width = float(np.std(selected_widths))
+            cv = std_width / max(1e-6, mean_width)
+            score = len(selected) / (1.0 + cv * 10.0)
+            stable = segment.copy()
+            stable.update(
+                {
+                    "number": number,
+                    "stable_start": int(start),
+                    "stable_end": int(end),
+                    "length": int(end - start + 1),
+                    "mean_width_px": mean_width,
+                    "std_width_px": std_width,
+                    "score": score,
+                }
+            )
+            stable_segments.append(stable)
 
-def choose_stable_segments(mask, bbox):
-    segments = []
-    for side in ("top", "right", "bottom", "left"):
-        side_segments = stable_segments_for_side(mask, side, bbox)
-        if side_segments:
-            segments.append(side_segments[0])
-    if not segments:
-        return []
-    segments.sort(key=lambda item: item["score"], reverse=True)
-    return segments
+    stable_segments.sort(key=lambda item: item["score"], reverse=True)
+    return stable_segments
 
 
 def allocate_samples_to_segments(segments, total):
@@ -388,61 +515,164 @@ def allocate_samples_to_segments(segments, total):
     return list(zip(chosen, counts.tolist()))
 
 
-def sample_stable_segments(mask, bbox):
-    segments = choose_stable_segments(mask, bbox)
-    allocations = allocate_samples_to_segments(segments, SAMPLES)
+def fallback_segments(selected_numbers, bbox):
+    result = []
+    for number in selected_numbers:
+        segment = build_segment_defs(bbox)[number].copy()
+        segment.update(
+            {
+                "number": number,
+                "stable_start": int(segment["start"]),
+                "stable_end": int(segment["end"]),
+                "length": int(segment["end"] - segment["start"] + 1),
+                "mean_width_px": "",
+                "std_width_px": "",
+                "score": 0.0,
+            }
+        )
+        result.append(segment)
+    return result
+
+
+def sample_selected_segments(mask, bbox, selected_numbers):
+    stable_segments = stable_segments_inside_selected(mask, bbox, selected_numbers)
+    used_fallback = False
+    if not stable_segments:
+        stable_segments = fallback_segments(selected_numbers, bbox)
+        used_fallback = True
+
+    allocations = allocate_samples_to_segments(stable_segments, SAMPLES)
+    used_segments = [segment for segment, _ in allocations]
+
     samples = []
     for segment, count in allocations:
         side = segment["side"]
-        start = segment["start"]
-        end = segment["end"]
+        start = int(segment["stable_start"])
+        end = int(segment["stable_end"])
         margin = max(1, int((end - start + 1) * 0.15))
-        positions = sample_positions(start, end, count, margin)
-        for position in positions:
+        for position in sample_positions(start, end, count, margin):
             position = int(position)
             if side in ("top", "bottom"):
                 result = measure_at(mask, side, position, bbox[1] if side == "top" else bbox[3], bbox)
             else:
                 result = measure_at(mask, side, bbox[0] if side == "left" else bbox[2], position, bbox)
             if result:
+                result["segment_number"] = segment["number"]
+                result["segment_name"] = segment["name"]
+                result["segment_coord_start"] = str(segment["coord_start"])
+                result["segment_coord_end"] = str(segment["coord_end"])
                 result["stable_segment_start"] = start
                 result["stable_segment_end"] = end
                 samples.append(result)
-    return samples
+    return samples, used_segments, used_fallback
 
 
-def measure_rectangle_widths(mask, image_path, mm_per_px):
+def select_origin_by_click(image):
+    max_display_width = 1200
+    max_display_height = 900
+    height, width = image.shape[:2]
+    scale = min(max_display_width / width, max_display_height / height, 1.0)
+    display_size = (int(width * scale), int(height * scale))
+    display_base = cv2.resize(image, display_size, interpolation=cv2.INTER_AREA)
+    state = {"point": None}
+    window_name = "click origin, then press Enter"
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["point"] = (int(round(x / scale)), int(round(y / scale)))
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window_name, on_mouse)
+    print()
+    print("请在弹出的图片窗口中，用鼠标左键点击你定义的 (0,0) 原点。")
+    print("点好以后按 Enter 确认；如果点错了，可以重新点。按 Esc 取消。")
+
+    while True:
+        display = display_base.copy()
+        cv2.putText(
+            display,
+            "Click origin, press Enter",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        if state["point"] is not None:
+            px = int(round(state["point"][0] * scale))
+            py = int(round(state["point"][1] * scale))
+            cv2.circle(display, (px, py), 8, (255, 0, 255), -1)
+            cv2.putText(
+                display,
+                f"origin=({state['point'][0]}, {state['point'][1]})",
+                (px + 10, py + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        cv2.imshow(window_name, display)
+        key = cv2.waitKey(20) & 0xFF
+        if key in (13, 10):
+            if state["point"] is None:
+                print("还没有点击原点，请先在图片上点一下。")
+                continue
+            cv2.destroyWindow(window_name)
+            return state["point"]
+        if key == 27:
+            cv2.destroyWindow(window_name)
+            raise RuntimeError("你取消了原点选择。")
+
+
+def bbox_from_origin(origin, mm_per_px, image_shape):
+    if PATTERN_SIZE_MM <= 0:
+        raise ValueError("PATTERN_SIZE_MM 必须大于 0。")
+
+    height, width = image_shape[:2]
+    side_px = PATTERN_SIZE_MM / mm_per_px
+    x1 = int(round(origin[0]))
+    y1 = int(round(origin[1]))
+    x0 = int(round(x1 - side_px))
+    y0 = int(round(y1 - side_px))
+
+    x0 = max(0, min(width - 1, x0))
+    y0 = max(0, min(height - 1, y0))
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    if x1 <= x0 or y1 <= y0:
+        raise RuntimeError("根据原点和 30 mm 尺寸生成的矩形框不合理，请重新点击原点。")
+    return (x0, y0, x1, y1)
+
+
+def choose_measurement_bbox(image, mask, mm_per_px):
+    mode = COORDINATE_MODE.strip().lower()
+    if mode == "auto_bbox":
+        return estimate_frame_bbox(mask), "auto_bbox", None
+
+    if mode == "manual_origin_30mm":
+        if MANUAL_ORIGIN_PX is None:
+            raise ValueError("COORDINATE_MODE='manual_origin_30mm' 时，需要填写 MANUAL_ORIGIN_PX。")
+        origin = MANUAL_ORIGIN_PX
+    elif mode == "click_origin_30mm":
+        origin = select_origin_by_click(image)
+    else:
+        raise ValueError("COORDINATE_MODE 只能是 click_origin_30mm、manual_origin_30mm 或 auto_bbox。")
+
+    bbox = bbox_from_origin(origin, mm_per_px, image.shape)
+    return bbox, mode, origin
+
+
+def measure_rectangle_widths(image, mask, image_path, mm_per_px, selected_numbers):
     ys, xs = np.where(mask)
     if len(xs) == 0:
         raise RuntimeError("打印线 mask 为空。")
 
-    x0, y0, x1, y1 = estimate_frame_bbox(mask)
-    bbox = (x0, y0, x1, y1)
-
-    samples = sample_stable_segments(mask, bbox)
+    line_bbox, coordinate_mode, origin = choose_measurement_bbox(image, mask, mm_per_px)
+    samples, stable_segments, used_fallback = sample_selected_segments(mask, line_bbox, selected_numbers)
     if not samples:
-        horizontal_len = max(1, x1 - x0 + 1)
-        vertical_len = max(1, y1 - y0 + 1)
-        counts = allocate_samples(SAMPLES, horizontal_len, vertical_len)
-        margin_x = max(2, int(horizontal_len * EDGE_MARGIN_FRACTION))
-        margin_y = max(2, int(vertical_len * EDGE_MARGIN_FRACTION))
-
-        for x in sample_positions(x0, x1, counts["top"], margin_x):
-            result = measure_at(mask, "top", int(x), y0, bbox)
-            if result:
-                samples.append(result)
-        for y in sample_positions(y0, y1, counts["right"], margin_y):
-            result = measure_at(mask, "right", x1, int(y), bbox)
-            if result:
-                samples.append(result)
-        for x in sample_positions(x0, x1, counts["bottom"], margin_x):
-            result = measure_at(mask, "bottom", int(x), y1, bbox)
-            if result:
-                samples.append(result)
-        for y in sample_positions(y0, y1, counts["left"], margin_y):
-            result = measure_at(mask, "left", x0, int(y), bbox)
-            if result:
-                samples.append(result)
+        raise RuntimeError("在你选择的段内没有找到可测量的线宽点，请换一个段编号或检查分割效果。")
 
     rows = []
     for index, sample in enumerate(samples, start=1):
@@ -450,35 +680,67 @@ def measure_rectangle_widths(mask, image_path, mm_per_px):
             {
                 "image": str(image_path),
                 "sample_id": index,
+                "selected_segment": sample.get("segment_number", ""),
+                "segment_name": sample.get("segment_name", ""),
+                "segment_coord_start": sample.get("segment_coord_start", ""),
+                "segment_coord_end": sample.get("segment_coord_end", ""),
                 "side": sample["side"],
                 "x": sample["x"],
                 "y": sample["y"],
                 "width_px": sample["width_px"],
                 "width_mm": sample["width_px"] * mm_per_px,
+                "stable_segment_start": sample.get("stable_segment_start", ""),
+                "stable_segment_end": sample.get("stable_segment_end", ""),
+                "coordinate_mode": coordinate_mode,
+                "origin_x": "" if origin is None else int(origin[0]),
+                "origin_y": "" if origin is None else int(origin[1]),
                 "kept": True,
                 "reject_reason": "",
             }
         )
-    return rows, bbox
+    return rows, line_bbox, stable_segments, used_fallback
 
+
+# ===================== 输出与标注 =====================
 
 def write_csv(rows, csv_path):
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
         fieldnames = [
             "image",
             "sample_id",
+            "selected_segment",
+            "segment_name",
+            "segment_coord_start",
+            "segment_coord_end",
             "side",
             "x",
             "y",
             "width_px",
             "width_mm",
+            "stable_segment_start",
+            "stable_segment_end",
+            "coordinate_mode",
+            "origin_x",
+            "origin_y",
             "kept",
             "reject_reason",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def prepare_output_dir(preferred_dir):
+    preferred_dir = Path(preferred_dir)
+    try:
+        preferred_dir.mkdir(parents=True, exist_ok=True)
+        return preferred_dir
+    except PermissionError:
+        fallback = Path(__file__).resolve().parent / "measurement_outputs"
+        fallback.mkdir(parents=True, exist_ok=True)
+        print(f"无法写入指定输出文件夹，已临时改为: {fallback}")
+        return fallback
 
 
 def draw_aruco_annotation(image, marker):
@@ -499,7 +761,120 @@ def draw_aruco_annotation(image, marker):
     return annotated
 
 
+def draw_overall_line_bbox(image, component_bbox):
+    annotated = image.copy()
+    x, y, w, h = component_bbox
+    cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    cv2.putText(
+        annotated,
+        "detected line area",
+        (x, max(20, y - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
+
+
+def draw_segment_map(image, bbox, selected_numbers):
+    annotated = image.copy()
+    segment_defs = build_segment_defs(bbox)
+    for number, segment in segment_defs.items():
+        color = (0, 220, 255) if number in selected_numbers else (180, 180, 180)
+        thickness = 4 if number in selected_numbers else 2
+        cv2.line(annotated, segment["p1"], segment["p2"], color, thickness)
+        mx = int(round((segment["p1"][0] + segment["p2"][0]) / 2.0))
+        my = int(round((segment["p1"][1] + segment["p2"][1]) / 2.0))
+        cv2.putText(
+            annotated,
+            str(number),
+            (mx + 4, my - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    x0, y0, x1, y1 = bbox
+    cv2.circle(annotated, (x1, y1), 7, (255, 0, 255), -1)
+    cv2.putText(
+        annotated,
+        "origin",
+        (x1 + 8, y1 + 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
+
+
+def draw_stable_segments(image, stable_segments, bbox):
+    annotated = image.copy()
+    if not stable_segments:
+        return annotated
+
+    x0, y0, x1, y1 = bbox
+    for index, segment in enumerate(stable_segments, start=1):
+        side = segment["side"]
+        start = int(segment["stable_start"])
+        end = int(segment["stable_end"])
+        if side == "top":
+            p1, p2 = (start, y0), (end, y0)
+        elif side == "bottom":
+            p1, p2 = (start, y1), (end, y1)
+        elif side == "left":
+            p1, p2 = (x0, start), (x0, end)
+        else:
+            p1, p2 = (x1, start), (x1, end)
+
+        cv2.line(annotated, p1, p2, (0, 150, 255), 5)
+        cv2.putText(
+            annotated,
+            f"stable {segment['number']}",
+            p1,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 120, 255),
+            1,
+            cv2.LINE_AA,
+        )
+    return annotated
+
+
+def draw_width_samples(image, rows):
+    annotated = image.copy()
+    for index, row in enumerate(rows, start=1):
+        color = (0, 180, 0) if row["kept"] else (0, 0, 255)
+        x = int(row["x"])
+        y = int(row["y"])
+        half = max(4, int(round(row["width_px"] / 2)))
+        if row["side"] in ("top", "bottom"):
+            p1, p2 = (x, y - half), (x, y + half)
+        else:
+            p1, p2 = (x - half, y), (x + half, y)
+        cv2.line(annotated, p1, p2, color, 2)
+        cv2.circle(annotated, (x, y), 4, color, -1)
+        cv2.putText(
+            annotated,
+            str(index),
+            (x + 5, y - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return annotated
+
+
 def main():
+    selected_numbers = parse_selected_segments(SELECTED_SEGMENTS)
+
     image_path = Path(IMAGE_PATH)
     if not image_path.exists():
         raise FileNotFoundError("请先修改 IMAGE_PATH 为真实图片路径。")
@@ -511,8 +886,8 @@ def main():
     marker = detect_aruco_marker(image)
     mm_per_px = MARKER_SIZE_MM / marker["side_px"]
     image_stem = image_path.stem
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_dir = prepare_output_dir(OUTPUT_DIR)
     output_csv = output_dir / f"result_{image_stem}.csv"
     annotated_image = output_dir / f"annotated_{image_stem}.png"
     line_mask_image = output_dir / f"line_mask_{image_stem}.png"
@@ -520,26 +895,36 @@ def main():
     line_mask, line_component_bbox, chosen_line_mode = detect_line_mask(
         image, marker["bbox"], marker["side_px"]
     )
-    rows, line_bbox = measure_rectangle_widths(line_mask, image_path, mm_per_px)
+    rows, line_bbox, stable_segments, used_fallback = measure_rectangle_widths(
+        image, line_mask, image_path, mm_per_px, selected_numbers
+    )
     rows = reject_outliers(rows, MIN_WIDTH_MM, MAX_WIDTH_MM)
     stats = summarize(rows)
 
     write_csv(rows, output_csv)
     cv2.imwrite(str(line_mask_image), (line_mask.astype(np.uint8) * 255))
 
-    annotated = draw_annotation(image, rows, ref_bbox=marker["bbox"], line_bbox=line_bbox)
+    annotated = draw_overall_line_bbox(image, line_component_bbox)
+    annotated = draw_segment_map(annotated, line_bbox, selected_numbers)
+    annotated = draw_stable_segments(annotated, stable_segments, line_bbox)
+    annotated = draw_width_samples(annotated, rows)
     annotated = draw_aruco_annotation(annotated, marker)
     cv2.imwrite(str(annotated_image), annotated)
 
     print("Done.")
     print(f"Image: {image_path}")
+    print(f"Selected segments: {selected_numbers}")
     print(f"ArUco id: {marker['id']}")
     print(f"Marker bbox: {marker['bbox']}")
     print(f"Marker side: {marker['side_px']:.2f} px")
     print(f"Marker size: {MARKER_SIZE_MM:.4f} mm")
     print(f"Scale: {mm_per_px:.8f} mm/pixel")
     print(f"Line mode: {chosen_line_mode}")
-    print(f"Line bbox: {line_bbox}")
+    print(f"Coordinate mode: {COORDINATE_MODE}")
+    print(f"Detected line area: {line_component_bbox}")
+    print(f"Measurement bbox: {line_bbox}")
+    print(f"Stable segments: {len(stable_segments)}")
+    print(f"Used fallback sampling: {used_fallback}")
     print(f"Measured samples: {len(rows)}")
     print(f"Kept samples: {stats['n_kept']}")
     print(f"Mean width: {stats['mean_mm']:.6f} mm")
