@@ -1,0 +1,11 @@
+﻿image,sample_id,selected_segment,segment_name,segment_coord_start,segment_coord_end,side,x,y,width_px,width_mm,stable_segment_start,stable_segment_end,coordinate_mode,origin_x,origin_y,kept,reject_reason
+D:\bio-print\database\data\raw\images\photos\25.jpg,1,6,left_lower,"(30, 15)","(30, 0)",left,1034,591,50.0,6.061601875366659,586,606,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,2,6,left_lower,"(30, 15)","(30, 0)",left,1034,593,50.0,6.061601875366659,586,606,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,3,6,left_lower,"(30, 15)","(30, 0)",left,1034,596,50.0,6.061601875366659,586,606,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,4,6,left_lower,"(30, 15)","(30, 0)",left,1034,598,50.0,6.061601875366659,586,606,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,5,6,left_lower,"(30, 15)","(30, 0)",left,1034,600,50.0,6.061601875366659,586,606,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,6,2,right_upper,"(0, 15)","(0, 30)",right,1255,468,5.0,0.6061601875366659,464,482,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,7,2,right_upper,"(0, 15)","(0, 30)",right,1255,470,5.0,0.6061601875366659,464,482,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,8,2,right_upper,"(0, 15)","(0, 30)",right,1255,473,5.0,0.6061601875366659,464,482,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,9,2,right_upper,"(0, 15)","(0, 30)",right,1255,475,5.0,0.6061601875366659,464,482,manual_origin_30mm,1257,606,True,
+D:\bio-print\database\data\raw\images\photos\25.jpg,10,2,right_upper,"(0, 15)","(0, 30)",right,1255,477,5.0,0.6061601875366659,464,482,manual_origin_30mm,1257,606,True,

@@ -13,7 +13,12 @@ IMAGE_PATH = r"D:\bio-print\database\data\raw\images\test.jpg"
 
 # ArUco 黑色大方块的真实边长，单位 mm。
 # 注意：填黑色方块外边缘到外边缘的尺寸，不是白色纸片总宽度。
-MARKER_SIZE_MM = 19.2
+MARKER_SIZE_MM = 16
+
+# Marker dictionary.
+# Your current purchased/used marker in 25.jpg is APRILTAG_36H11 ID 0.
+# If you later use the old generated ArUco marker, change this back to "DICT_4X4_50".
+MARKER_DICTIONARY_NAME = "DICT_APRILTAG_36H11"
 
 # 输出文件夹。程序会生成：
 # annotated_原图名.png、line_mask_原图名.png、result_原图名.csv
@@ -27,7 +32,7 @@ SAMPLES = 10
 # 5=左边上半段，6=左边下半段，7=下边左半段，8=下边右半段
 # 可以写 "1"，也可以写 "1,2,8"。
 # 留空 "" 时，程序运行后会在 VS Code 终端里让你输入。
-SELECTED_SEGMENTS = "2,3,4,5,6,7"
+SELECTED_SEGMENTS = ""
 
 # 如果自动分割不理想，可改成 "yellow_green"、"dark"、"bright" 或 "color_excess"。
 LINE_MODE = "auto"
@@ -46,6 +51,10 @@ MAX_WIDTH_MM = None
 COORDINATE_MODE = "click_origin_30mm"
 PATTERN_SIZE_MM = 30.0
 MANUAL_ORIGIN_PX = None
+
+# When measuring one edge, only search near that edge.
+# This prevents the left edge from accidentally grabbing the right edge/tail.
+EDGE_SEARCH_BAND_MM = 6.0
 
 
 # ===================== 基础工具函数 =====================
@@ -83,12 +92,20 @@ def sample_positions(start, end, count, margin):
     return np.linspace(usable_start, usable_end, count + 2, dtype=int)[1:-1]
 
 
-def measure_at(mask, side, x, y, bbox):
+def measure_at(mask, side, x, y, bbox, search_radius_px=None):
     x0, y0, x1, y1 = bbox
     if side in ("top", "bottom"):
         if x < x0 or x > x1:
             return None
-        ys = np.flatnonzero(mask[y0 : y1 + 1, x]) + y0
+        if search_radius_px is None:
+            search_y0, search_y1 = y0, y1
+        elif side == "top":
+            search_y0 = y0
+            search_y1 = min(y1, y0 + int(search_radius_px))
+        else:
+            search_y0 = max(y0, y1 - int(search_radius_px))
+            search_y1 = y1
+        ys = np.flatnonzero(mask[search_y0 : search_y1 + 1, x]) + search_y0
         runs = contiguous_runs(ys)
         if not runs:
             return None
@@ -103,7 +120,15 @@ def measure_at(mask, side, x, y, bbox):
 
     if y < y0 or y > y1:
         return None
-    xs = np.flatnonzero(mask[y, x0 : x1 + 1]) + x0
+    if search_radius_px is None:
+        search_x0, search_x1 = x0, x1
+    elif side == "left":
+        search_x0 = x0
+        search_x1 = min(x1, x0 + int(search_radius_px))
+    else:
+        search_x0 = max(x0, x1 - int(search_radius_px))
+        search_x1 = x1
+    xs = np.flatnonzero(mask[y, search_x0 : search_x1 + 1]) + search_x0
     runs = contiguous_runs(xs)
     if not runs:
         return None
@@ -187,7 +212,9 @@ def parse_selected_segments(text):
 def aruco_dictionary():
     if not hasattr(cv2, "aruco"):
         raise RuntimeError("当前 OpenCV 没有 aruco 模块，请安装 opencv-contrib-python。")
-    return cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    if not hasattr(cv2.aruco, MARKER_DICTIONARY_NAME):
+        raise RuntimeError(f"当前 OpenCV 不支持这个标记字典: {MARKER_DICTIONARY_NAME}")
+    return cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, MARKER_DICTIONARY_NAME))
 
 
 def detect_aruco_marker(image):
@@ -417,14 +444,28 @@ def build_segment_defs(bbox):
     }
 
 
-def build_segment_profile(mask, segment, bbox):
+def build_segment_profile(mask, segment, bbox, search_radius_px):
     side = segment["side"]
     profile = []
     for coord in range(int(segment["start"]), int(segment["end"]) + 1):
         if side in ("top", "bottom"):
-            result = measure_at(mask, side, coord, bbox[1] if side == "top" else bbox[3], bbox)
+            result = measure_at(
+                mask,
+                side,
+                coord,
+                bbox[1] if side == "top" else bbox[3],
+                bbox,
+                search_radius_px,
+            )
         else:
-            result = measure_at(mask, side, bbox[0] if side == "left" else bbox[2], coord, bbox)
+            result = measure_at(
+                mask,
+                side,
+                bbox[0] if side == "left" else bbox[2],
+                coord,
+                bbox,
+                search_radius_px,
+            )
         if result:
             result["coord"] = coord
             profile.append(result)
@@ -445,13 +486,13 @@ def robust_width_limits(widths):
     return max(1.0, lower), max(2.0, upper)
 
 
-def stable_segments_inside_selected(mask, bbox, selected_numbers):
+def stable_segments_inside_selected(mask, bbox, selected_numbers, search_radius_px):
     segment_defs = build_segment_defs(bbox)
     stable_segments = []
 
     for number in selected_numbers:
         segment = segment_defs[number].copy()
-        profile = build_segment_profile(mask, segment, bbox)
+        profile = build_segment_profile(mask, segment, bbox, search_radius_px)
         if len(profile) < 5:
             continue
 
@@ -534,8 +575,9 @@ def fallback_segments(selected_numbers, bbox):
     return result
 
 
-def sample_selected_segments(mask, bbox, selected_numbers):
-    stable_segments = stable_segments_inside_selected(mask, bbox, selected_numbers)
+def sample_selected_segments(mask, bbox, selected_numbers, mm_per_px):
+    search_radius_px = max(8, int(round(EDGE_SEARCH_BAND_MM / mm_per_px)))
+    stable_segments = stable_segments_inside_selected(mask, bbox, selected_numbers, search_radius_px)
     used_fallback = False
     if not stable_segments:
         stable_segments = fallback_segments(selected_numbers, bbox)
@@ -553,9 +595,23 @@ def sample_selected_segments(mask, bbox, selected_numbers):
         for position in sample_positions(start, end, count, margin):
             position = int(position)
             if side in ("top", "bottom"):
-                result = measure_at(mask, side, position, bbox[1] if side == "top" else bbox[3], bbox)
+                result = measure_at(
+                    mask,
+                    side,
+                    position,
+                    bbox[1] if side == "top" else bbox[3],
+                    bbox,
+                    search_radius_px,
+                )
             else:
-                result = measure_at(mask, side, bbox[0] if side == "left" else bbox[2], position, bbox)
+                result = measure_at(
+                    mask,
+                    side,
+                    bbox[0] if side == "left" else bbox[2],
+                    position,
+                    bbox,
+                    search_radius_px,
+                )
             if result:
                 result["segment_number"] = segment["number"]
                 result["segment_name"] = segment["name"]
@@ -670,7 +726,9 @@ def measure_rectangle_widths(image, mask, image_path, mm_per_px, selected_number
         raise RuntimeError("打印线 mask 为空。")
 
     line_bbox, coordinate_mode, origin = choose_measurement_bbox(image, mask, mm_per_px)
-    samples, stable_segments, used_fallback = sample_selected_segments(mask, line_bbox, selected_numbers)
+    samples, stable_segments, used_fallback = sample_selected_segments(
+        mask, line_bbox, selected_numbers, mm_per_px
+    )
     if not samples:
         raise RuntimeError("在你选择的段内没有找到可测量的线宽点，请换一个段编号或检查分割效果。")
 
