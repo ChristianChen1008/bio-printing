@@ -27,6 +27,11 @@ OUTPUT_DIR = Path(r"D:\bio-print\database\data\raw\images\annotated_pictures")
 # 每张图一共取多少个宽度点。
 SAMPLES = 10
 
+# Use only the single most stable continuous run among the selected segments.
+SINGLE_BEST_STABLE_SEGMENT = True
+MIN_VALID_SAMPLES = 7
+MAX_WIDTH_RANGE_RATIO = 0.50
+
 # 选择要测量的段编号：
 # 1=右边下半段，2=右边上半段，3=上边右半段，4=上边左半段
 # 5=左边上半段，6=左边下半段，7=下边左半段，8=下边右半段
@@ -45,12 +50,17 @@ MIN_WIDTH_MM = None
 MAX_WIDTH_MM = None
 
 # Coordinate mode:
+# "click_two_corners": click the real (0, 0) origin, then click the top-left corner.
+# "manual_two_corners": use MANUAL_ORIGIN_PX and MANUAL_TOP_LEFT_PX directly.
 # "click_origin_30mm": click the real (0, 0) origin, then build a 30 mm square.
 # "manual_origin_30mm": use MANUAL_ORIGIN_PX directly, no click window.
 # "auto_bbox": old method, estimate the rectangle from the printed line mask.
-COORDINATE_MODE = "click_origin_30mm"
+COORDINATE_MODE = "click_two_corners"
 PATTERN_SIZE_MM = 30.0
 MANUAL_ORIGIN_PX = None
+MANUAL_TOP_LEFT_PX = None
+MANUAL_X_AXIS_PX = None
+MANUAL_Y_AXIS_PX = None
 
 # When measuring one edge, only search near that edge.
 # This prevents the left edge from accidentally grabbing the right edge/tail.
@@ -583,6 +593,9 @@ def sample_selected_segments(mask, bbox, selected_numbers, mm_per_px):
         stable_segments = fallback_segments(selected_numbers, bbox)
         used_fallback = True
 
+    if SINGLE_BEST_STABLE_SEGMENT:
+        stable_segments = stable_segments[:1]
+
     allocations = allocate_samples_to_segments(stable_segments, SAMPLES)
     used_segments = [segment for segment, _ in allocations]
 
@@ -682,6 +695,158 @@ def select_origin_by_click(image):
             raise RuntimeError("你取消了原点选择。")
 
 
+def select_two_corners_by_click(image):
+    max_display_width = 1200
+    max_display_height = 900
+    height, width = image.shape[:2]
+    scale = min(max_display_width / width, max_display_height / height, 1.0)
+    display_size = (int(width * scale), int(height * scale))
+    display_base = cv2.resize(image, display_size, interpolation=cv2.INTER_AREA)
+    state = {"points": []}
+    window_name = "click origin and top-left, then press Enter"
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            point = (int(round(x / scale)), int(round(y / scale)))
+            if len(state["points"]) >= 2:
+                state["points"] = []
+            state["points"].append(point)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window_name, on_mouse)
+    print()
+    print("请在弹出的图片窗口中依次点击两个点：")
+    print("第 1 下：右下角 (0,0) 原点；第 2 下：左上角 (30,30) 对应点。")
+    print("两个点都点好后按 Enter 确认；如果点错，继续点击会重新开始。按 Esc 取消。")
+
+    while True:
+        display = display_base.copy()
+        cv2.putText(
+            display,
+            "1) origin  2) top-left  Enter=OK",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        display_points = []
+        for point in state["points"]:
+            display_points.append((int(round(point[0] * scale)), int(round(point[1] * scale))))
+
+        if len(display_points) >= 1:
+            cv2.circle(display, display_points[0], 8, (255, 0, 255), -1)
+            cv2.putText(
+                display,
+                "origin",
+                (display_points[0][0] + 10, display_points[0][1] + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if len(display_points) >= 2:
+            cv2.circle(display, display_points[1], 8, (255, 255, 0), -1)
+            cv2.putText(
+                display,
+                "top-left",
+                (display_points[1][0] + 10, display_points[1][1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.rectangle(display, display_points[1], display_points[0], (0, 255, 255), 3)
+
+        cv2.imshow(window_name, display)
+        key = cv2.waitKey(20) & 0xFF
+        if key in (13, 10):
+            if len(state["points"]) < 2:
+                print("还没有点够两个点，请先点击 origin 和 top-left。")
+                continue
+            cv2.destroyWindow(window_name)
+            return state["points"][0], state["points"][1]
+        if key == 27:
+            cv2.destroyWindow(window_name)
+            raise RuntimeError("你取消了两点定框。")
+
+
+def select_three_points_by_click(image):
+    max_display_width = 1200
+    max_display_height = 900
+    height, width = image.shape[:2]
+    scale = min(max_display_width / width, max_display_height / height, 1.0)
+    display_size = (int(width * scale), int(height * scale))
+    display_base = cv2.resize(image, display_size, interpolation=cv2.INTER_AREA)
+    state = {"points": []}
+    window_name = "click 3 frame points, then press Enter"
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            point = (int(round(x / scale)), int(round(y / scale)))
+            if len(state["points"]) >= 3:
+                state["points"] = []
+            state["points"].append(point)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window_name, on_mouse)
+    print()
+    print("请依次点击 3 个点：右下原点(0,0)、左下角(30,0)、右上角(0,30)。")
+    print("3 个点点击完成后按 Enter 确认；点错时继续点击会重新开始；按 Esc 取消。")
+
+    labels = ("origin (0,0)", "x end (30,0)", "y end (0,30)")
+    colors = ((255, 0, 255), (0, 255, 255), (255, 255, 0))
+    while True:
+        display = display_base.copy()
+        cv2.putText(
+            display,
+            "1) origin  2) left-bottom  3) right-top  Enter=OK",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        display_points = [
+            (int(round(point[0] * scale)), int(round(point[1] * scale)))
+            for point in state["points"]
+        ]
+        for index, point in enumerate(display_points):
+            cv2.circle(display, point, 8, colors[index], -1)
+            cv2.putText(
+                display,
+                labels[index],
+                (point[0] + 10, point[1] + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                colors[index],
+                2,
+                cv2.LINE_AA,
+            )
+        if len(display_points) == 3:
+            origin, x_end, y_end = display_points
+            top_left = (x_end[0] + y_end[0] - origin[0], x_end[1] + y_end[1] - origin[1])
+            polygon = np.array([top_left, y_end, origin, x_end], dtype=np.int32)
+            cv2.polylines(display, [polygon], True, (0, 255, 255), 3, cv2.LINE_AA)
+
+        cv2.imshow(window_name, display)
+        key = cv2.waitKey(20) & 0xFF
+        if key in (13, 10):
+            if len(state["points"]) < 3:
+                print("还没有点够 3 个点，请先完成三个角点。")
+                continue
+            cv2.destroyWindow(window_name)
+            return state["points"][0], state["points"][1], state["points"][2]
+        if key == 27:
+            cv2.destroyWindow(window_name)
+            raise RuntimeError("你取消了三点定框。")
+
+
 def bbox_from_origin(origin, mm_per_px, image_shape):
     if PATTERN_SIZE_MM <= 0:
         raise ValueError("PATTERN_SIZE_MM 必须大于 0。")
@@ -702,19 +867,47 @@ def bbox_from_origin(origin, mm_per_px, image_shape):
     return (x0, y0, x1, y1)
 
 
+def bbox_from_two_corners(origin, top_left, image_shape):
+    height, width = image_shape[:2]
+    x0 = int(round(top_left[0]))
+    y0 = int(round(top_left[1]))
+    x1 = int(round(origin[0]))
+    y1 = int(round(origin[1]))
+
+    x0, x1 = sorted((x0, x1))
+    y0, y1 = sorted((y0, y1))
+    x0 = max(0, min(width - 1, x0))
+    y0 = max(0, min(height - 1, y0))
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    if x1 <= x0 or y1 <= y0:
+        raise RuntimeError("两点生成的矩形框不合理，请重新点击右下原点和左上角。")
+    return (x0, y0, x1, y1)
+
+
 def choose_measurement_bbox(image, mask, mm_per_px):
     mode = COORDINATE_MODE.strip().lower()
     if mode == "auto_bbox":
         return estimate_frame_bbox(mask), "auto_bbox", None
 
-    if mode == "manual_origin_30mm":
+    if mode == "manual_two_corners":
+        if MANUAL_ORIGIN_PX is None or MANUAL_TOP_LEFT_PX is None:
+            raise ValueError("COORDINATE_MODE='manual_two_corners' 时，需要填写 MANUAL_ORIGIN_PX 和 MANUAL_TOP_LEFT_PX。")
+        origin = MANUAL_ORIGIN_PX
+        bbox = bbox_from_two_corners(MANUAL_ORIGIN_PX, MANUAL_TOP_LEFT_PX, image.shape)
+        return bbox, mode, origin
+    elif mode == "click_two_corners":
+        origin, top_left = select_two_corners_by_click(image)
+        bbox = bbox_from_two_corners(origin, top_left, image.shape)
+        return bbox, mode, origin
+    elif mode == "manual_origin_30mm":
         if MANUAL_ORIGIN_PX is None:
             raise ValueError("COORDINATE_MODE='manual_origin_30mm' 时，需要填写 MANUAL_ORIGIN_PX。")
         origin = MANUAL_ORIGIN_PX
     elif mode == "click_origin_30mm":
         origin = select_origin_by_click(image)
     else:
-        raise ValueError("COORDINATE_MODE 只能是 click_origin_30mm、manual_origin_30mm 或 auto_bbox。")
+        raise ValueError("COORDINATE_MODE 只能是 click_two_corners、manual_two_corners、click_origin_30mm、manual_origin_30mm 或 auto_bbox。")
 
     bbox = bbox_from_origin(origin, mm_per_px, image.shape)
     return bbox, mode, origin
@@ -757,6 +950,143 @@ def measure_rectangle_widths(image, mask, image_path, mm_per_px, selected_number
             }
         )
     return rows, line_bbox, stable_segments, used_fallback
+
+
+def measure_rectangle_widths_three_points(
+    image, mask, image_path, mm_per_px, selected_numbers, origin, x_axis_end, y_axis_end
+):
+    """Rectify a rotated or sheared 30 mm frame before sampling its line widths."""
+    if PATTERN_SIZE_MM <= 0:
+        raise ValueError("PATTERN_SIZE_MM must be greater than zero.")
+
+    side_px = max(80, int(round(PATTERN_SIZE_MM / mm_per_px)))
+    source = np.float32([origin, x_axis_end, y_axis_end])
+    destination = np.float32(
+        [(side_px, side_px), (0, side_px), (side_px, 0)]
+    )
+    transform = cv2.getAffineTransform(source, destination)
+    rectified_image = cv2.warpAffine(
+        image,
+        transform,
+        (side_px + 1, side_px + 1),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+    )
+    rectified_mask = cv2.warpAffine(
+        mask.astype(np.uint8),
+        transform,
+        (side_px + 1, side_px + 1),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+    ).astype(bool)
+    rectified_mask = clean_mask(rectified_mask)
+
+    line_bbox = (0, 0, side_px, side_px)
+    samples, stable_segments, used_fallback = sample_selected_segments(
+        rectified_mask, line_bbox, selected_numbers, mm_per_px
+    )
+    if not samples:
+        raise RuntimeError("No measurable line-width points were found in the selected segments.")
+
+    rows = []
+    for index, sample in enumerate(samples, start=1):
+        rows.append(
+            {
+                "image": str(image_path),
+                "sample_id": index,
+                "selected_segment": sample.get("segment_number", ""),
+                "segment_name": sample.get("segment_name", ""),
+                "segment_coord_start": sample.get("segment_coord_start", ""),
+                "segment_coord_end": sample.get("segment_coord_end", ""),
+                "side": sample["side"],
+                "x": sample["x"],
+                "y": sample["y"],
+                "width_px": sample["width_px"],
+                "width_mm": sample["width_px"] * mm_per_px,
+                "stable_segment_start": sample.get("stable_segment_start", ""),
+                "stable_segment_end": sample.get("stable_segment_end", ""),
+                "coordinate_mode": "three_point_rectified",
+                "origin_x": int(origin[0]),
+                "origin_y": int(origin[1]),
+                "kept": True,
+                "reject_reason": "",
+            }
+        )
+    inverse_transform = cv2.invertAffineTransform(transform)
+    return rows, line_bbox, stable_segments, used_fallback, rectified_image, inverse_transform
+
+
+def draw_three_point_measurement(image, origin, x_axis_end, y_axis_end, inverse_transform, rows):
+    """Draw the affine frame and rectified sample widths back onto the source image."""
+    annotated = image.copy()
+    top_left = (
+        int(x_axis_end[0] + y_axis_end[0] - origin[0]),
+        int(x_axis_end[1] + y_axis_end[1] - origin[1]),
+    )
+    polygon = np.array([top_left, y_axis_end, origin, x_axis_end], dtype=np.int32)
+    cv2.polylines(annotated, [polygon], True, (0, 255, 255), 3, cv2.LINE_AA)
+
+    points_and_labels = (
+        (origin, "1 origin"),
+        (x_axis_end, "2 x-end"),
+        (y_axis_end, "3 y-end"),
+    )
+    for point, label in points_and_labels:
+        point = (int(point[0]), int(point[1]))
+        cv2.circle(annotated, point, 7, (255, 0, 255), -1)
+        cv2.putText(
+            annotated,
+            label,
+            (point[0] + 8, point[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    for index, row in enumerate(rows, start=1):
+        x = float(row["x"])
+        y = float(row["y"])
+        half = max(4.0, float(row["width_px"]) / 2.0)
+        if row["side"] in ("top", "bottom"):
+            rectified_points = np.float32([[[x, y - half]], [[x, y + half]], [[x, y]]])
+        else:
+            rectified_points = np.float32([[[x - half, y]], [[x + half, y]], [[x, y]]])
+        source_points = cv2.transform(rectified_points, inverse_transform).reshape(-1, 2)
+        p1 = tuple(np.round(source_points[0]).astype(int))
+        p2 = tuple(np.round(source_points[1]).astype(int))
+        center = tuple(np.round(source_points[2]).astype(int))
+        color = (0, 180, 0) if row.get("kept") else (0, 0, 255)
+        cv2.line(annotated, p1, p2, color, 2, cv2.LINE_AA)
+        cv2.circle(annotated, center, 4, color, -1)
+        cv2.putText(
+            annotated,
+            str(index),
+            (center[0] + 6, center[1] - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+    return annotated
+
+
+def validate_width_consistency(rows):
+    kept_values = sorted(float(row["width_mm"]) for row in rows if row.get("kept"))
+    if len(kept_values) < MIN_VALID_SAMPLES:
+        raise RuntimeError(
+            f"Only {len(kept_values)} valid samples remain; at least {MIN_VALID_SAMPLES} are required."
+        )
+    median = float(np.median(kept_values))
+    relative_range = (kept_values[-1] - kept_values[0]) / max(median, 1e-9)
+    if relative_range > MAX_WIDTH_RANGE_RATIO:
+        raise RuntimeError(
+            "The selected points are not consistent enough "
+            f"(range/median={relative_range:.2f}). Re-click the frame or choose a different segment."
+        )
+    return {"relative_range": relative_range, "n_kept": len(kept_values)}
 
 
 # ===================== 输出与标注 =====================

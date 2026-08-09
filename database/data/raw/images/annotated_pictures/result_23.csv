@@ -1,0 +1,11 @@
+﻿image,sample_id,selected_segment,segment_name,segment_coord_start,segment_coord_end,side,x,y,width_px,width_mm,stable_segment_start,stable_segment_end,coordinate_mode,origin_x,origin_y,kept,reject_reason
+D:\bio-print\database\data\raw\images\photos\23.jpg,1,7,bottom_left,"(30, 0)","(15, 0)",bottom,1040,692,22.0,2.6679821399520267,1005,1128,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,2,7,bottom_left,"(30, 0)","(15, 0)",bottom,1057,694,14.0,1.697806816333108,1005,1128,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,3,7,bottom_left,"(30, 0)","(15, 0)",bottom,1075,698,17.0,2.0616225626902023,1005,1128,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,4,7,bottom_left,"(30, 0)","(15, 0)",bottom,1092,698,16.0,1.9403506472378376,1005,1128,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,5,2,right_upper,"(0, 15)","(0, 30)",right,1248,524,8.0,0.9701753236189188,496,582,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,6,2,right_upper,"(0, 15)","(0, 30)",right,1250,539,5.0,0.6063595772618242,496,582,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,7,2,right_upper,"(0, 15)","(0, 30)",right,1249,554,7.0,0.848903408166554,496,582,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,8,2,right_upper,"(0, 15)","(0, 30)",right,1250,469,4.0,0.4850876618094594,459,486,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,9,2,right_upper,"(0, 15)","(0, 30)",right,1250,475,4.0,0.4850876618094594,459,486,manual_origin_30mm,1252,706,True,
+D:\bio-print\database\data\raw\images\photos\23.jpg,10,6,left_lower,"(30, 15)","(30, 0)",left,1030,691,50.0,6.063595772618243,681,702,manual_origin_30mm,1252,706,False,outlier

@@ -1,9 +1,9 @@
 from pathlib import Path
 import importlib.util
-import shutil
+import math
+import random
 import sys
 import traceback
-from datetime import datetime
 
 import cv2
 
@@ -13,8 +13,11 @@ import cv2
 IMAGE_DIR = Path(r"D:\bio-print\database\data\raw\images\photos")
 EXCEL_PATH = Path(r"D:\bio-print\database\data\raw\metadata\bioprint_metadata_template_v2.xlsx")
 
-# Annotated images, masks, and per-image CSV files will be saved here.
-OUTPUT_DIR = Path(r"D:\bio-print\database\data\raw\images\annotated_pictures")
+# Save one visual quality-control image for each measured photo.
+# No masks, CSV files, or Excel backup files are created.
+SAVE_ANNOTATED_IMAGES = True
+ANNOTATED_OUTPUT_DIR = Path(r"D:\bio-print\database\data\raw\images\annotated_pictures")
+OUTPUT_DIR = None
 
 # The single-image ArUco measurement script must be in the same folder as this batch script.
 MEASURE_SCRIPT_PATH = Path(__file__).with_name("线宽测量测试_ArUco版.py")
@@ -52,14 +55,9 @@ SAVE_AFTER_EACH_IMAGE = True
 RESULT_COLUMNS = {
     "mean": "线宽平均值(mm)",
     "median": "线宽中位数(mm)",
-    "std": "线宽标准差(mm)",
-    "kept": "有效测量点数",
-    "total": "总测量点数",
-    "segments": "测量片段",
-    "status": "测量状态",
-    "time": "测量时间",
-    "annotated": "标注图路径",
-    "csv": "线宽结果CSV路径",
+    "max": "线宽最大值(mm)",
+    "min": "线宽最小值(mm)",
+    "random": "线宽随机测点值(mm)",
 }
 
 
@@ -132,7 +130,7 @@ def load_measure_module():
     module.LINE_BBOX = None
     module.MIN_WIDTH_MM = MIN_WIDTH_MM
     module.MAX_WIDTH_MM = MAX_WIDTH_MM
-    module.COORDINATE_MODE = "manual_origin_30mm"
+    module.COORDINATE_MODE = "manual_two_corners"
     module.PATTERN_SIZE_MM = PATTERN_SIZE_MM
     module.EDGE_SEARCH_BAND_MM = EDGE_SEARCH_BAND_MM
     return module
@@ -153,8 +151,9 @@ def measure_one_image(measure, image_id, image_path, segment_text):
         image, marker["bbox"], marker["side_px"]
     )
 
-    origin = measure.select_origin_by_click(image)
+    origin, top_left = measure.select_two_corners_by_click(image)
     measure.MANUAL_ORIGIN_PX = origin
+    measure.MANUAL_TOP_LEFT_PX = top_left
 
     selected_numbers = measure.parse_selected_segments(segment_text)
     rows, line_bbox, stable_segments, used_fallback = measure.measure_rectangle_widths(
@@ -163,22 +162,6 @@ def measure_one_image(measure, image_id, image_path, segment_text):
     rows = measure.reject_outliers(rows, MIN_WIDTH_MM, MAX_WIDTH_MM)
     stats = measure.summarize(rows)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    image_stem = image_path.stem
-    output_csv = OUTPUT_DIR / f"result_{image_stem}.csv"
-    annotated_image = OUTPUT_DIR / f"annotated_{image_stem}.png"
-    line_mask_image = OUTPUT_DIR / f"line_mask_{image_stem}.png"
-
-    measure.write_csv(rows, output_csv)
-    cv2.imwrite(str(line_mask_image), (line_mask.astype("uint8") * 255))
-
-    annotated = measure.draw_overall_line_bbox(image, line_component_bbox)
-    annotated = measure.draw_segment_map(annotated, line_bbox, selected_numbers)
-    annotated = measure.draw_stable_segments(annotated, stable_segments, line_bbox)
-    annotated = measure.draw_width_samples(annotated, rows)
-    annotated = measure.draw_aruco_annotation(annotated, marker)
-    cv2.imwrite(str(annotated_image), annotated)
-
     return {
         "image_id": image_id,
         "segments": ",".join(str(v) for v in selected_numbers),
@@ -186,8 +169,6 @@ def measure_one_image(measure, image_id, image_path, segment_text):
         "rows": rows,
         "total_samples": len(rows),
         "status": "完成",
-        "annotated_image": annotated_image,
-        "output_csv": output_csv,
         "chosen_line_mode": chosen_line_mode,
         "used_fallback": used_fallback,
         "origin": origin,
@@ -257,37 +238,43 @@ def build_id_to_row(ws, header_row, id_col):
 
 
 def write_result_to_excel(ws, headers, row_number, result):
-    stats = result["stats"]
-    values = {
-        RESULT_COLUMNS["mean"]: stats["mean_mm"],
-        RESULT_COLUMNS["median"]: stats["median_mm"],
-        RESULT_COLUMNS["std"]: stats["std_mm"],
-        RESULT_COLUMNS["kept"]: stats["n_kept"],
-        RESULT_COLUMNS["total"]: result["total_samples"],
-        RESULT_COLUMNS["segments"]: result["segments"],
-        RESULT_COLUMNS["status"]: result["status"],
-        RESULT_COLUMNS["time"]: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        RESULT_COLUMNS["annotated"]: str(result["annotated_image"]),
-        RESULT_COLUMNS["csv"]: str(result["output_csv"]),
-    }
+    values = result["excel_values"]
     for header, value in values.items():
         ws.cell(row=row_number, column=headers[header]).value = value
+
+
+def build_excel_values(rows, image_id):
+    """Build five traceable values from the accepted width samples of one image."""
+    kept_values = sorted(
+        float(row["width_mm"])
+        for row in rows
+        if row.get("kept") and math.isfinite(float(row["width_mm"]))
+    )
+    if not kept_values:
+        raise RuntimeError("10 个测点筛选后没有保留合理的线宽值，请重新检查选段和检测框。")
+
+    count = len(kept_values)
+    middle = count // 2
+    median = (
+        kept_values[middle]
+        if count % 2 == 1
+        else (kept_values[middle - 1] + kept_values[middle]) / 2.0
+    )
+
+    # Use the image ID as a seed so a repeated run remains reproducible.
+    random_value = random.Random(str(image_id)).choice(kept_values)
+    return {
+        RESULT_COLUMNS["median"]: median,
+        RESULT_COLUMNS["mean"]: sum(kept_values) / count,
+        RESULT_COLUMNS["max"]: kept_values[-1],
+        RESULT_COLUMNS["min"]: kept_values[0],
+        RESULT_COLUMNS["random"]: random_value,
+    }
 
 
 def write_failure_to_excel(ws, headers, row_number, message):
-    values = {
-        RESULT_COLUMNS["status"]: f"失败: {message}",
-        RESULT_COLUMNS["time"]: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    for header, value in values.items():
-        ws.cell(row=row_number, column=headers[header]).value = value
-
-
-def backup_excel():
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = EXCEL_PATH.with_name(f"{EXCEL_PATH.stem}_backup_{timestamp}{EXCEL_PATH.suffix}")
-    shutil.copy2(EXCEL_PATH, backup_path)
-    return backup_path
+    # Only result values are written to Excel. Failures are printed in the terminal.
+    return
 
 
 # ===================== Main flow =====================
@@ -307,9 +294,6 @@ def main():
     header_row, headers = find_header_row_and_columns(ws)
     headers = ensure_result_columns(ws, header_row, headers)
     id_to_row = build_id_to_row(ws, header_row, headers[ID_COLUMN_NAME])
-
-    backup_path = backup_excel()
-    print(f"已备份 Excel: {backup_path}")
 
     measure = load_measure_module()
 
@@ -333,13 +317,14 @@ def main():
             continue
 
         print()
-        print(f"图片 {image_id}: 请先点击原点。")
+        print(f"图片 {image_id}: 请先点击右下原点，再点击左上角。")
         try:
+            print(f"Image {image_id}: click (1) right-bottom, (2) left-bottom, (3) right-top.")
             image_preview = cv2.imread(str(image_path))
             if image_preview is None:
                 raise FileNotFoundError(f"无法读取图片: {image_path}")
 
-            # Let the user click the origin first, matching the requested workflow.
+            # Three known corners rectify a rotated or sheared print frame.
             measure_image = image_preview
             marker = None
             line_mask = None
@@ -350,8 +335,10 @@ def main():
             line_mask, line_component_bbox, chosen_line_mode = measure.detect_line_mask(
                 measure_image, marker["bbox"], marker["side_px"]
             )
-            origin = measure.select_origin_by_click(measure_image)
+            origin, x_axis_end, y_axis_end = measure.select_three_points_by_click(measure_image)
             measure.MANUAL_ORIGIN_PX = origin
+            measure.MANUAL_X_AXIS_PX = x_axis_end
+            measure.MANUAL_Y_AXIS_PX = y_axis_end
 
             segment_text = ask_text(
                 f"图片 {image_id} 的测量片段",
@@ -371,42 +358,56 @@ def main():
                 continue
 
             selected_numbers = measure.parse_selected_segments(segment_text)
-            rows, line_bbox, stable_segments, used_fallback = measure.measure_rectangle_widths(
-                measure_image, line_mask, image_path, mm_per_px, selected_numbers
+            rows, line_bbox, stable_segments, used_fallback, rectified_image, inverse_transform = (
+                measure.measure_rectangle_widths_three_points(
+                    measure_image,
+                    line_mask,
+                    image_path,
+                    mm_per_px,
+                    selected_numbers,
+                    origin,
+                    x_axis_end,
+                    y_axis_end,
+                )
             )
             rows = measure.reject_outliers(rows, MIN_WIDTH_MM, MAX_WIDTH_MM)
             stats = measure.summarize(rows)
 
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            image_stem = image_path.stem
-            output_csv = OUTPUT_DIR / f"result_{image_stem}.csv"
-            annotated_image = OUTPUT_DIR / f"annotated_{image_stem}.png"
-            line_mask_image = OUTPUT_DIR / f"line_mask_{image_stem}.png"
+            if SAVE_ANNOTATED_IMAGES:
+                ANNOTATED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                annotated = measure.draw_overall_line_bbox(measure_image, line_component_bbox)
+                annotated = measure.draw_three_point_measurement(
+                    annotated,
+                    origin,
+                    x_axis_end,
+                    y_axis_end,
+                    inverse_transform,
+                    rows,
+                )
+                annotated = measure.draw_aruco_annotation(annotated, marker)
+                annotated_path = ANNOTATED_OUTPUT_DIR / f"annotated_{image_path.stem}.png"
+                if not cv2.imwrite(str(annotated_path), annotated):
+                    raise RuntimeError(f"Unable to save annotated image: {annotated_path}")
 
-            measure.write_csv(rows, output_csv)
-            cv2.imwrite(str(line_mask_image), (line_mask.astype("uint8") * 255))
-
-            annotated = measure.draw_overall_line_bbox(measure_image, line_component_bbox)
-            annotated = measure.draw_segment_map(annotated, line_bbox, selected_numbers)
-            annotated = measure.draw_stable_segments(annotated, stable_segments, line_bbox)
-            annotated = measure.draw_width_samples(annotated, rows)
-            annotated = measure.draw_aruco_annotation(annotated, marker)
-            cv2.imwrite(str(annotated_image), annotated)
+            consistency = measure.validate_width_consistency(rows)
 
             result = {
                 "image_id": image_id,
                 "segments": ",".join(str(v) for v in selected_numbers),
                 "stats": stats,
                 "rows": rows,
+                "excel_values": build_excel_values(rows, image_id),
                 "total_samples": len(rows),
                 "status": "完成",
-                "annotated_image": annotated_image,
-                "output_csv": output_csv,
                 "chosen_line_mode": chosen_line_mode,
                 "used_fallback": used_fallback,
                 "origin": origin,
+                "x_axis_end": x_axis_end,
+                "y_axis_end": y_axis_end,
+                "relative_range": consistency["relative_range"],
             }
             write_result_to_excel(ws, headers, row_number, result)
+
             completed += 1
 
             print(
@@ -433,7 +434,6 @@ def main():
     print(f"失败: {failed}")
     print(f"跳过: {skipped}")
     print(f"Excel: {EXCEL_PATH}")
-    print(f"输出图片/CSV: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
